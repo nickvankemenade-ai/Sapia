@@ -117,7 +117,9 @@ class TrainConfig:
 
     # ---- optimizer / schedule
     learning_rate: float = F(3e-4, "Peak learning rate.")
-    min_lr_ratio: float = F(0.1, "Final LR as a fraction of the peak (cosine floor).")
+    lr_schedule: str = F("wsd", "wsd (warmup, constant, linear decay over the last anneal_fraction) | cosine.")
+    min_lr_ratio: float = F(0.0, "Final LR as a fraction of the peak.")
+    anneal_fraction: float = F(0.1, "Final share of max_tokens trained on the anneal mix (and the WSD decay).")
     warmup_tokens: int = F(400_000_000, "Linear warmup length, in tokens.")
     weight_decay: float = F(0.1, "AdamW weight decay, applied to >=2D parameters only.")
     beta1: float = F(0.9, "AdamW beta1.")
@@ -150,6 +152,9 @@ class TrainConfig:
     seed: int = F(1337, "Random seed.")
     device: str = F("auto", "auto | cuda | cuda:N | cpu.")
     wandb: bool = F(False, "Log to Weights & Biases if the package is installed (never required).")
+    wandb_project: str = F("sapia", "Weights & Biases project name.")
+    ntfy_topic: Optional[str] = F(None, "ntfy.sh topic for phone notifications (auto = $SAPIA_NTFY_TOPIC or off).")
+    notify_every_tokens: int = F(1_000_000_000, "Send a progress notification every N tokens.")
     peak_flops: Optional[float] = F(None, "GPU peak FLOP/s for the MFU estimate. auto = lookup by GPU name.")
     dry_run: bool = F(False, "Detect resources, plan batch/data settings, print them and exit without training.")
 
@@ -170,6 +175,12 @@ class TrainConfig:
             raise ConfigError("keep_last must be >= 1")
         if self.learning_rate <= 0:
             raise ConfigError("learning_rate must be positive")
+        if self.lr_schedule not in ("wsd", "cosine"):
+            raise ConfigError(f"lr_schedule must be wsd|cosine, got {self.lr_schedule!r}")
+        if not 0.0 <= self.anneal_fraction < 1.0:
+            raise ConfigError("anneal_fraction must be in [0, 1)")
+        if self.notify_every_tokens < 1:
+            raise ConfigError("notify_every_tokens must be >= 1")
         for name in ("eval_interval", "log_interval", "ckpt_interval", "max_nan_skips", "max_batch_size"):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{name} must be >= 1")
@@ -181,7 +192,7 @@ class TrainConfig:
 # ----------------------------------------------------------------------------- presets
 
 def _preset_sapia() -> TrainConfig:
-    return TrainConfig()
+    return TrainConfig(wandb=True)
 
 
 def _preset_tiny() -> TrainConfig:

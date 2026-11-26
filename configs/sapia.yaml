@@ -38,7 +38,9 @@ reuse_batch_plan: true
 
 # ---- optimizer / schedule
 learning_rate: 3.0e-4
-min_lr_ratio: 0.1
+lr_schedule: wsd           # warmup, constant, linear decay over the anneal phase
+min_lr_ratio: 0.0
+anneal_fraction: 0.1       # last 10% of tokens: anneal mix + lr decay
 warmup_tokens: 400_000_000
 weight_decay: 0.1          # applied to >=2D parameters only
 beta1: 0.9
@@ -69,6 +71,9 @@ resume: auto
 max_nan_skips: 10
 seed: 1337
 device: auto
-wandb: false
+wandb: true
+wandb_project: sapia
+ntfy_topic: auto           # or set SAPIA_NTFY_TOPIC
+notify_every_tokens: 1_000_000_000
 peak_flops: auto
 dry_run: false

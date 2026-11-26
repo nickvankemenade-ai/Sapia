@@ -2,7 +2,7 @@
 
 A ~1.2B-parameter language model, pretrained from scratch on a curated English mix (FineWeb-Edu plus conversational data) on a single GH200.
 
-Status: model and data preparation written; training loop next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the proposed architecture and [docs/DATA.md](docs/DATA.md) for the data mix.
+Status: complete pipeline (data prep, training, export). See [docs/RUNBOOK.md](docs/RUNBOOK.md) to run it on a GPU server. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the proposed architecture and [docs/DATA.md](docs/DATA.md) for the data mix.
 
 Sapia is an internal model: one user, weights not released.
 

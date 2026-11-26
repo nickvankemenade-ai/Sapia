@@ -83,12 +83,21 @@ def pattern_tokens(n: int, period: int = 17, offset: int = 0) -> np.ndarray:
 
 @pytest.fixture
 def pattern_dataset(tmp_path: Path) -> Path:
+    """A prepared mix: one main source and one anneal source of periodic tokens."""
+    import json
+
     data_dir = tmp_path / "data"
-    write_token_dataset(
-        data_dir,
-        train=[pattern_tokens(6000), pattern_tokens(5000, offset=5)],
-        val=[pattern_tokens(1500, offset=9)],
-    )
+    write_token_dataset(data_dir / "main" / "pattern",
+                        train=[pattern_tokens(6000), pattern_tokens(5000, offset=5)],
+                        val=[pattern_tokens(1500, offset=9)])
+    write_token_dataset(data_dir / "anneal" / "pattern_late",
+                        train=[pattern_tokens(4000, offset=2)], val=[pattern_tokens(800, offset=4)])
+    src = lambda name, phase: {"name": name, "share": 1.0, "dir": f"{phase}/{name}", "target_tokens": 1,
+                               "prepared": True, "train_tokens": 1, "val_tokens": 1}
+    mix = {"version": 1, "total_tokens": 1, "anneal_fraction": 0.1, "tokenizer": "bytes",
+           "phases": {"main": {"tokens": 1, "sources": [src("pattern", "main")]},
+                      "anneal": {"tokens": 1, "sources": [src("pattern_late", "anneal")]}}}
+    (data_dir / "mix.json").write_text(json.dumps(mix), encoding="utf-8")
     return data_dir
 
 

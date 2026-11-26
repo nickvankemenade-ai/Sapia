@@ -176,7 +176,7 @@ def make_gpu_probe(model, block_size: int, vocab_size: int, device, precision,
         for _cycle in range(optimizer_steps):
             for _ in range(micro_steps):
                 with precision.autocast(device.type):
-                    _, loss = model(x, y)
+                    loss = model(x, y).loss
                 scaler.scale(loss / micro_steps).backward()
             del loss
             model.zero_grad(set_to_none=True)
