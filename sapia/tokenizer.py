@@ -46,11 +46,13 @@ class SmolLM2Tokenizer:
 
 
 class ByteTokenizer:
-    """UTF-8 bytes (0..255) plus EOT = 256. Needs no downloads; used by tests and offline demos."""
+    """UTF-8 bytes (0..255), EOT = 256, <|im_start|> = 257, <|im_end|> = 258. Offline; used by tests."""
 
     name = "bytes"
-    vocab_size = 257
+    vocab_size = 259
     eot_token = 256
+    im_start_token = 257
+    im_end_token = 258
 
     def encode(self, text: str) -> list[int]:
         return list(text.encode("utf-8"))

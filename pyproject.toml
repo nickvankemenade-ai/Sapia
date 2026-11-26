@@ -9,6 +9,9 @@ dependencies = [
     "PyYAML",
     "tokenizers>=0.15",    # SmolLM2 tokenizer; encode_special_tokens
     "huggingface_hub",
+    "datasets>=3",
+    "pyarrow",
+    "psutil",
 ]
 
 [project.optional-dependencies]

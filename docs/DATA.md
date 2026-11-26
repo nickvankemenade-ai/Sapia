@@ -1,6 +1,8 @@
-# Sapia pretraining data (proposal, v0)
+# Sapia pretraining data (v0)
 
-Status: **draft for discussion**. Nothing is downloaded or tokenized yet.
+Status: **implemented** in `sapia/sources.py` (sources, filters, formatting) and
+`sapia/prepare_mix.py` (preparation). A tiny end-to-end run against the real datasets works;
+the full ~15B-token preparation has not been run yet.
 
 Goal: an English model that is **accurate** (knowledge, reasoning) and **conversational**
 (natural back-and-forth, explanations to a person, everyday language), within a budget of
@@ -14,10 +16,10 @@ the throughput trial; the shares below stay fixed and scale with it.
 | 45% | ~6.1B | **FineWeb-Edu** (score >= 3) | Accuracy: textbook-style explanations, the knowledge backbone |
 | 25% | ~3.4B | **DCLM-Baseline** | Natural, question-and-answer-style web text (its quality filter was trained on instruction data and ELI5 answers) |
 | 7% | ~0.9B | **Wikipedia** (English) | Dense, checked facts |
-| 6.5% | ~0.9B | **StackExchange** (all English sites, answered questions) | Expert Q&A: a question, then a careful answer, with votes as a quality signal |
-| 6.5% | ~0.9B | **Reddit threads** (Dolma subset) | Casual multi-turn conversation, opinions, everyday language |
-| 5% | ~0.7B | **FineMath** | Step-by-step math reasoning |
-| 5% | ~0.7B | **Project Gutenberg books** (English fiction and drama, PG-19 or a full-catalogue dump) | Long, coherent narrative with written dialogue; plays are almost pure dialogue |
+| 6.5% | ~0.9B | **StackExchange** (English sites except StackOverflow and meta sites; answers with score >= 1) | Expert Q&A: a question, then a careful answer, with votes as a quality signal |
+| 6.5% | ~0.9B | **Reddit threads** (50 curated subreddits, threads of 2+ messages, average score >= 1) | Casual multi-turn conversation, opinions, everyday language |
+| 5% | ~0.7B | **FineMath** (score 3; the 4+ tier is kept for the final phase) | Step-by-step math reasoning |
+| 5% | ~0.7B | **Project Gutenberg books** (English, dialogue-rich: >= 1 quote mark per 1000 characters, as a fiction/drama proxy) | Long, coherent narrative with written dialogue; plays are almost pure dialogue |
 
 Roughly: **57% accuracy-oriented** (Edu, Wikipedia, FineMath), **38% conversational**
 (DCLM, StackExchange, Reddit), **5% narrative**.
@@ -59,8 +61,33 @@ SmolTalk stays reserved for chat fine-tuning (SFT) after pretraining, so it is n
   removed.
 - **UltraChat (final phase only)**: SmolLM2's chat template (`<|im_start|>user ... <|im_end|>`),
   so the model already knows the turn markers when chat fine-tuning starts.
-- No source is repeated more than once (all are far larger than their share, except Wikipedia,
-  which is used for at most one pass).
+- No document appears in both phases: big sources (FineWeb-Edu, DCLM) give the final phase every
+  10th file and the main mix the other nine; small sources (Wikipedia, StackExchange, Reddit) are
+  split by a hash of each document's id (90% main, 10% final phase).
+- If a source runs out before its target, the loader repeats it so its share holds; prep warns.
+
+## Where each source comes from
+
+All are parquet on the Hugging Face Hub, pinned to the commit seen on the first run.
+
+| Source | Dataset | Files |
+|---|---|---|
+| FineWeb-Edu | `HuggingFaceFW/fineweb-edu` | `sample/100BT/*.parquet` |
+| DCLM-Baseline | `mlfoundations/dclm-baseline-1.0-parquet` | `filtered/**/*.parquet` |
+| Wikipedia | `wikimedia/wikipedia` | `20231101.en/*.parquet` |
+| StackExchange | `HuggingFaceH4/stack-exchange-preferences` | `data/*/*.parquet` (HTML converted to plain text) |
+| Reddit | `HuggingFaceGECLM/REDDIT_threaded` | `data/*.parquet` |
+| FineMath | `HuggingFaceTB/finemath` | `finemath-3plus` (main), `finemath-4plus` (final phase) |
+| Gutenberg | `manu/project_gutenberg` | `data/en-*.parquet` (licence header and footer removed) |
+| UltraChat | `HuggingFaceH4/ultrachat_200k` | `data/train_sft-*.parquet` |
+
+Two changes from the first plan, found while checking the sources:
+
+- **Reddit**: Dolma's Reddit data is single comments, not conversations. `REDDIT_threaded` has
+  whole threads from 50 mostly high-quality subreddits (AskHistorians, askscience,
+  explainlikeimfive, changemyview, personalfinance, ...), which fits the conversational goal better.
+- **StackExchange**: StackOverflow is ~70% of the data and almost all code, so it is left out
+  (v0 has no code). The remaining sites hold ~6 GB of posts, enough for both phases.
 
 ## Licenses
 
@@ -69,8 +96,8 @@ SmolTalk stays reserved for chat fine-tuning (SFT) after pretraining, so it is n
 | FineWeb-Edu, FineMath | ODC-By | Attribution |
 | DCLM-Baseline | CC-BY-4.0 | Attribution |
 | StackExchange, Wikipedia | CC-BY-SA | Attribution, share-alike |
-| Reddit (Dolma) | ODC-By (dataset); Reddit's own terms apply to the content | Fine for personal/research use; reconsider before releasing weights commercially |
-| PG-19 | Public domain texts | — |
+| Reddit (REDDIT_threaded) | Reddit's own terms apply to the content | Fine for personal/research use; reconsider before releasing weights commercially |
+| Project Gutenberg | Public domain texts | — |
 | UltraChat | MIT | Generated with ChatGPT; OpenAI's terms restrict using outputs to build competing models |
 
 Sapia is internal (one user, weights not released), so all of these are fine as they are.
@@ -81,5 +108,5 @@ weights were ever released or used commercially.
 
 1. **Code**: none in v0. Adding ~5-10% would give basic coding ability, at the cost of a harder
    download (Stack-Edu needs the files fetched separately from Software Heritage).
-2. **Hugging Face dataset IDs and exact subsets** (e.g. which Dolma version holds the Reddit and
-   StackExchange data in usable form) are to be checked when the data-prep code is written.
+2. **Gutenberg filter**: the quote-density proxy also lets some biographies through. Raise
+   `min_quote_density` in `sapia/sources.py` if books turn out too non-fictional.
