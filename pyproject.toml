@@ -1,0 +1,30 @@
+[project]
+name = "sapia"
+version = "0.1.0"
+description = "Sapia: a ~1.2B-parameter English language model pretrained from scratch"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3",          # >=2.5 recommended (native GQA in scaled_dot_product_attention)
+    "numpy",
+    "PyYAML",
+    "tokenizers>=0.15",    # SmolLM2 tokenizer; encode_special_tokens
+    "huggingface_hub",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["sapia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
+markers = [
+    "network: downloads from the Hugging Face Hub",
+    "gpu: needs a CUDA device",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]

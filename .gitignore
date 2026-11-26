@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+# data, runs and checkpoints never go into git (and should not live in OneDrive either)
+data/
+runs/
+*.pt
+*.bin
+*.safetensors
+*.tmp
+wandb/
+.env
