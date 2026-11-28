@@ -21,4 +21,4 @@ Prepared data goes to `data/` (git-ignored). Keep it outside OneDrive for real r
 
 ## Training on Kaggle TPUs
 
-`python -m sapia.train --tpu ...`: see [docs/KAGGLE.md](docs/KAGGLE.md) (sessions of ~9 hours that continue from each other).
+`python -m sapia.train --tpu-jax ...` (JAX) or `--tpu` (PyTorch/XLA): see [docs/KAGGLE.md](docs/KAGGLE.md) (sessions of ~9 hours that continue from each other). Checkpoints work across `--cpu`, `--gpu`, `--tpu` and `--tpu-jax`.

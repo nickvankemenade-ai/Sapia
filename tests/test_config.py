@@ -43,3 +43,19 @@ def test_cli_overrides_and_auto_values():
 def test_invalid_head_split_is_rejected():
     with pytest.raises(ConfigError):
         parse_train_args(["--model.n_kv_head", "3"])
+
+
+def test_backend_flags():
+    assert parse_train_args(["--tpu-jax"]).backend == "tpu-jax"
+    assert parse_train_args(["--tpu_jax"]).backend == "tpu-jax"
+    tpu = parse_train_args(["--tpu"])
+    assert tpu.backend == "tpu" and tpu.tpu is True
+    cpu = parse_train_args(["--cpu"])
+    assert cpu.backend == "cpu" and cpu.device == "cpu" and cpu.tpu is False
+    assert parse_train_args(["--gpu"]).device == "cuda"
+    assert parse_train_args(["--gpu", "--device", "cuda:1"]).device == "cuda:1"
+    assert parse_train_args([]).backend == "auto"
+    with pytest.raises(ConfigError):
+        parse_train_args(["--tpu", "--backend", "gpu"])
+    with pytest.raises(ConfigError):
+        parse_train_args(["--cpu", "--device", "cuda"])

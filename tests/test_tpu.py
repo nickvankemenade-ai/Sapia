@@ -143,3 +143,10 @@ def test_kaggle_latest_checkpoint_picks_highest_step(tmp_path):
         torch.save({"model": {}, "step": step}, d / f"ckpt_{step:09d}.pt")
     assert latest_checkpoint(tmp_path / "input") == tmp_path / "input" / "session-2" / "run" / "checkpoints"
     assert latest_checkpoint(tmp_path / "nothing-here") is None
+
+
+def test_kaggle_merge_leaves_out_a_phase_without_data(tmp_path):
+    inputs = tmp_path / "input"
+    _write_mix(inputs / "sapia-prep-1", {"fineweb_edu": "main"})
+    merged = merge_mixes(find_mixes(inputs), tmp_path / "merged", log=lambda s: None)
+    assert list(merged["phases"]) == ["main"]

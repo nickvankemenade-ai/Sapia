@@ -66,7 +66,12 @@ def merge_mixes(mix_dirs: list[Path], out_dir: Path, log=print) -> dict:
             # An absolute "dir" points straight into the read-only input (Path(mix) / abs == abs).
             entries.append({**src, "dir": str((d / src["dir"]).resolve())})
             log(f"[merge] {phase}/{spec.name}: {src['train_tokens']:,} tokens from {d}")
-        merged["phases"][phase] = {"tokens": base["phases"].get(phase, {}).get("tokens", 0), "sources": entries}
+        if entries:                 # a phase with no prepared data is left out (training then skips it)
+            merged["phases"][phase] = {"tokens": base["phases"].get(phase, {}).get("tokens", 0), "sources": entries}
+        else:
+            log(f"[merge] WARNING: no data for the {phase} phase yet; attach it before training reaches that phase")
+    if "main" not in merged["phases"]:
+        raise FileNotFoundError("no main-phase data in the inputs")
     (out_dir / "mix.json").write_text(json.dumps(merged, indent=2), encoding="utf-8")
     if missing:
         log(f"[merge] WARNING: not prepared in any input: {', '.join(missing)} (their share goes to the others)")

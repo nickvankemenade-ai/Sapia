@@ -1,12 +1,26 @@
 # Training Sapia on Kaggle's free TPUs
 
-Sapia trains on a TPU v5e-8 with `python -m sapia.train --tpu` (PyTorch/XLA, all 8 chips,
-fully sharded, every step compiled and fused by XLA, Pallas flash attention). Kaggle sessions
-stop after ~9 hours, so training runs as a **chain of sessions**: each one saves a checkpoint
-just before its time is up, and the next one continues from it, exactly where it stopped.
+Sapia trains on a TPU v5e-8 in one of two ways, both using all 8 chips, fully sharded, every
+step compiled and fused by XLA, with Pallas flash attention:
 
-Status: the TPU code path is written and its logic is tested on CPU; **it has not run on a real
-TPU yet**. Do the 15-minute test session (step 3) before the first long one.
+| flag | framework | notes |
+|---|---|---|
+| `--tpu-jax` | JAX | one compiled program per optimizer step; usually the faster one on TPU |
+| `--tpu` | PyTorch/XLA | needs `torch_xla` installed |
+
+(`--gpu` and `--cpu` exist too.) **Checkpoints are the same in every mode**: a session can stop
+under `--tpu` and the next one continue under `--tpu-jax`, or the other way round, with the
+same weights, optimizer state, data position and schedule.
+
+Kaggle sessions stop after ~9 hours, so training runs as a **chain of sessions**: each one saves
+a checkpoint just before its time is up, and the next one continues from it, exactly where it
+stopped. Checkpoints are also saved every 45 minutes, on a stop signal and (JAX mode, if the
+weights are still good) after a crash; each one is checksummed, and resuming falls back to an
+older one if the newest is damaged.
+
+Status: both TPU paths are tested on CPU (including resuming across modes and sharding over
+several simulated devices); **neither has run on a real TPU yet**. Do the benchmark and test
+session (step 3) before the first long one.
 
 ## 1. Data (done once, CPU notebooks)
 
@@ -73,9 +87,11 @@ Create a notebook `sapia-train`:
   version of `sapia-train` itself** (its output holds the checkpoint).
 - Optional secrets: `HF_TOKEN`, `SAPIA_NTFY_TOPIC` (phone alerts), `WANDB_API_KEY`.
 
-Cell 1: setup (installs PyTorch/XLA only if this image lacks it)
+Cell 1: setup. Set `MODE` to `"jax"` (`--tpu-jax`) or `"xla"` (`--tpu`); it installs only
+what this image lacks. JAX mode still needs PyTorch (CPU) to read and write checkpoints.
 
 ```python
+MODE = "jax"          # "jax" -> --tpu-jax, "xla" -> --tpu
 import os, subprocess, sys
 try:
     from kaggle_secrets import UserSecretsClient
@@ -84,11 +100,22 @@ try:
         except Exception: pass
 except Exception:
     pass
-try:
-    import torch_xla  # noqa
-    print("torch_xla", torch_xla.__version__)
-except ImportError:
-    !pip install -q 'torch~=2.6.0' 'torch_xla[tpu]~=2.6.0' -f https://storage.googleapis.com/libtpu-releases/index.html
+if MODE == "jax":
+    try:
+        import jax; assert jax.devices()[0].platform == "tpu"
+    except Exception:
+        !pip install -q -U 'jax[tpu]' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+    try:
+        import torch
+    except ImportError:
+        !pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+else:
+    try:
+        import torch_xla  # noqa
+        print("torch_xla", torch_xla.__version__)
+    except ImportError:
+        !pip install -q 'torch~=2.6.0' 'torch_xla[tpu]~=2.6.0' -f https://storage.googleapis.com/libtpu-releases/index.html
+FLAG = "--tpu-jax" if MODE == "jax" else "--tpu"
 !git clone -q -b design/architecture https://github.com/nickvankemenade-ai/Sapia.git /kaggle/working/Sapia || (cd /kaggle/working/Sapia && git pull -q)
 %cd /kaggle/working/Sapia
 !pip install -q tokenizers
@@ -106,7 +133,7 @@ print("resume from:", RESUME)
 Cell 3: train until just before the session limit
 
 ```python
-!python -m sapia.train --tpu --config configs/sapia.yaml \
+!python -m sapia.train {FLAG} --config configs/sapia.yaml \
     --data_dir /tmp/sapia-mix --out_dir /kaggle/working/run \
     --max_tokens 16e9 --resume {RESUME} \
     --max_hours 8.3 --keep_last 1 --save_best false --ckpt_minutes 45
@@ -120,16 +147,42 @@ margin. The checkpoint (~9 GB) lands in this version's output under `run/checkpo
 that just finished, and Save & Run All again. Cell 2 finds the newest checkpoint among the inputs
 automatically. Repeat until the run reports `complete`; then `run/final.pt` holds the bf16 weights.
 
-## 3. First time: a 15-minute test session
+## 3. First time: find the fastest setup (one ~30-minute session)
 
-Run cell 3 once with `--max_hours 0.25` instead of 8.3 (interactive session is fine). Check the log for:
-- `Sapia TPU training | ... 8 x TPU (SPMD, fully sharded)`: all 8 chips in use.
+Run cells 1 and 2 with `MODE = "jax"` (interactive session is fine), then instead of cell 3:
+
+```python
+!python -m sapia.bench_tpu --config configs/sapia.yaml --data_dir /tmp/sapia-mix
+```
+
+It tries five `--tpu-jax` setups, each in its own process: how the weights and gradients are
+split over the 8 chips (`--tpu_sharding dp | zero2 | fsdp`) and whether activations are
+recomputed to save memory (`--tpu_remat none | dots`). Each one compiles (a few minutes) and
+trains 10 timed steps, and it prints tokens/s and MFU, or "out of TPU memory". The last lines
+name the fastest, for example:
+
+```
+fastest: dp-dots: 140,000 tok/s, MFU 48.0% -> 16B tokens in ~32 TPU hours
+use: --tpu-jax --tpu_sharding dp --tpu_remat dots
+```
+
+Add those two flags to cell 3. The defaults (`zero2`, no remat) are used if you skip this.
+
+Then run cell 3 once with `--max_hours 0.25 --out_dir /kaggle/working/test` and check:
 - `attention: Pallas flash attention kernel` and no `WARNING: flash attention failed`.
-- `step ... | ... tok/s | mfu ...%`: the speed. Tokens/hour = tok/s x 3600; 16B tokens needs
-  16e9 / (tok/s x 3600) hours in total.
-- If it fails with a TPU out-of-memory ("RESOURCE_EXHAUSTED"), add `--tpu_tokens_per_chip 1024`.
-- The first steps are slow while XLA compiles (minutes); that is normal and happens again once
-  at the switch to the anneal phase.
+- `step ... | ... tok/s | mfu ...%` close to the benchmark.
+- `checkpoint saved: ... verified` at the end: the session-end save works, and how long it takes.
+
+To compare with PyTorch/XLA, restart the session (only one framework can hold the TPU), set
+`MODE = "xla"` and run the same 15-minute cell 3; use whichever is faster.
+
+Notes:
+- The first steps are slow while XLA compiles (minutes); that happens again once at the switch to
+  the anneal phase (longer sequences).
+- Out of TPU memory ("RESOURCE_EXHAUSTED") in a real run: `--tpu_remat dots`, then
+  `--tpu_remat full`, then `--tpu_sharding fsdp`. (`--tpu_tokens_per_chip` cannot go below 2048:
+  one 2048-token anneal sequence per chip is the minimum.)
+- If libtpu refuses to start because of an unknown flag, add `--tpu_xla_flags false`.
 
 ## Notes
 
@@ -137,5 +190,9 @@ Run cell 3 once with `--max_hours 0.25` instead of 8.3 (interactive session is f
   --save_best false`.
 - The merged data folder lives in `/tmp`, outside the saved output; the data stays in the
   read-only input datasets.
-- Checkpoints are ordinary PyTorch files: they load on CUDA or CPU (`python -m sapia.sample`).
+- Checkpoints are ordinary PyTorch files, whichever mode wrote them: they load on CUDA or CPU
+  (`python -m sapia.sample`) and continue under `--tpu`, `--tpu-jax`, `--gpu` or `--cpu`.
+  Switching mode between sessions only means changing `MODE` in cell 1.
+- Each checkpoint has a `.sha256` file next to it. If the newest checkpoint is damaged (for
+  example a broken copy between sessions), resuming says so and uses the one before it.
 - Changing `--max_tokens` between sessions is safe until the last 10% (the WSD decay).

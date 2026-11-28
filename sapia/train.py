@@ -284,10 +284,14 @@ def train(cfg: TrainConfig, *, after_checkpoint: Optional[Callable[[Path], None]
     ``_stop_after_steps`` is a test hook that simulates a stop signal after N steps.
     """
     cfg.validate()
-    if cfg.tpu:
+    if cfg.backend == "tpu":
         from .train_tpu import train_tpu
 
         return train_tpu(cfg, _stop_after_steps=_stop_after_steps)
+    if cfg.backend == "tpu-jax":
+        from .train_jax import train_jax
+
+        return train_jax(cfg, _stop_after_steps=_stop_after_steps)
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     logger = get_logger("sapia.train", out_dir / "train.log")

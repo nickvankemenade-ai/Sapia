@@ -231,3 +231,32 @@ def test_resume_from_explicit_path(tmp_path, small_model_cfg, pattern_dataset):
     out = train(cfg2)
     assert (out["status"], out["step"]) == ("complete", 12)
     assert list_checkpoints(tmp_path / "b" / "checkpoints")[-1][0] == 12
+
+
+def test_checksum_detects_damage_and_falls_back(tmp_path):
+    from sapia.checkpoint import SUM_SUFFIX, load_checkpoint, load_latest_checkpoint, save_checkpoint, verify_checkpoint
+
+    d = tmp_path / "ck"
+    old = save_checkpoint(d, 10, {"model": {"w": torch.ones(64)}}, keep_last=3)
+    new = save_checkpoint(d, 20, {"model": {"w": torch.full((64,), 2.0)}}, keep_last=3)
+    assert (d / (new.name + SUM_SUFFIX)).exists() and verify_checkpoint(new)[0]
+    data = bytearray(new.read_bytes())
+    data[len(data) // 2] ^= 0xFF                                   # one flipped byte
+    new.write_bytes(bytes(data))
+    assert not verify_checkpoint(new)[0]
+    with pytest.raises(ValueError):
+        load_checkpoint(new)
+    warnings = []
+    state, path = load_latest_checkpoint(d, log=warnings.append)
+    assert path == old and state["step"] == 10 and warnings
+    new.write_bytes(bytes(data[:100]))                              # a truncated copy
+    assert "size" in verify_checkpoint(new)[1]
+
+
+def test_prune_removes_checksum_files(tmp_path):
+    from sapia.checkpoint import SUM_SUFFIX, save_checkpoint
+
+    d = tmp_path / "ck"
+    for step in (1, 2, 3):
+        save_checkpoint(d, step, {"model": {}}, keep_last=1)
+    assert sorted(p.name for p in d.iterdir()) == ["ckpt_000000003.pt", "ckpt_000000003.pt" + SUM_SUFFIX]

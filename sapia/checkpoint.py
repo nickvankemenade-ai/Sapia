@@ -8,9 +8,19 @@ A checkpoint file ``ckpt_<step>.pt`` only ever appears under its final name afte
 been completely written and flushed (temp file + ``os.replace``), so a crash or
 preemption during a save can never leave a truncated "latest" checkpoint. Leftover
 ``*.tmp`` files are ignored and cleaned up.
+
+Every checkpoint also gets a ``ckpt_<step>.pt.sha256`` sidecar (size and SHA-256 of the
+finished file, computed by reading it back). Loading verifies it, so a file damaged while
+being copied between Kaggle sessions is detected and the next older checkpoint is used
+instead. Older checkpoints are only pruned after the new one is written and verified.
+
+The format is the same for every backend (CPU, GPU, PyTorch/XLA TPU, JAX TPU): plain CPU
+PyTorch tensors with PyTorch parameter names and optimizer state, so a run can continue on
+any of them.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -25,6 +35,7 @@ from .utils import replace_with_retry
 
 CKPT_RE = re.compile(r"^ckpt_(\d+)\.pt$")
 CKPT_FORMAT = 1
+SUM_SUFFIX = ".sha256"
 BEST_NAME = "best.pt"
 BEST_META_NAME = "best.json"
 
@@ -50,7 +61,8 @@ def clean_stale_tmp(ckpt_dir: str | os.PathLike) -> None:
     d = Path(ckpt_dir)
     if not d.is_dir():
         return
-    for p in [*d.glob("ckpt_*.pt.tmp"), *d.glob(BEST_NAME + ".tmp"), *d.glob(BEST_META_NAME + ".tmp")]:
+    for p in [*d.glob("ckpt_*.pt.tmp"), *d.glob("ckpt_*.pt" + SUM_SUFFIX + ".tmp"), *d.glob(BEST_NAME + ".tmp"),
+              *d.glob(BEST_META_NAME + ".tmp")]:
         try:
             p.unlink()
         except OSError:
@@ -70,8 +82,57 @@ def _atomic_torch_save(state: dict, final: Path) -> None:
     replace_with_retry(tmp, final)
 
 
-def save_checkpoint(ckpt_dir: str | os.PathLike, step: int, state: dict, keep_last: int = 2) -> Path:
-    """Atomically write ``state`` as the checkpoint for ``step`` and prune old checkpoints."""
+def file_digest(path: str | os.PathLike, chunk: int = 16 << 20) -> tuple[int, str]:
+    """(size in bytes, SHA-256 hex) of a file, read in large chunks."""
+    h, size = hashlib.sha256(), 0
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(chunk)
+            if not block:
+                break
+            h.update(block)
+            size += len(block)
+    return size, h.hexdigest()
+
+
+def write_checksum(path: str | os.PathLike) -> dict:
+    """Read the finished file back and record its size and hash in ``<file>.sha256``."""
+    path = Path(path)
+    size, digest = file_digest(path)
+    meta = {"file": path.name, "bytes": size, "sha256": digest}
+    side = path.with_name(path.name + SUM_SUFFIX)
+    tmp = side.with_name(side.name + ".tmp")
+    tmp.write_text(json.dumps(meta), encoding="utf-8")
+    replace_with_retry(tmp, side)
+    return meta
+
+
+def verify_checkpoint(path: str | os.PathLike) -> tuple[bool, str]:
+    """Check a checkpoint against its sidecar. (True, reason) if it matches or has no sidecar."""
+    path = Path(path)
+    side = path.with_name(path.name + SUM_SUFFIX)
+    if not side.is_file():
+        return True, "no checksum file (older checkpoint)"
+    try:
+        meta = json.loads(side.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return True, f"checksum file unreadable ({exc}); not verified"
+    if not path.is_file():
+        return False, "file missing"
+    if path.stat().st_size != meta.get("bytes"):
+        return False, f"size {path.stat().st_size:,} != recorded {meta.get('bytes'):,} bytes (truncated copy?)"
+    if file_digest(path)[1] != meta.get("sha256"):
+        return False, "SHA-256 mismatch (corrupted file)"
+    return True, "checksum ok"
+
+
+def save_checkpoint(ckpt_dir: str | os.PathLike, step: int, state: dict, keep_last: int = 2,
+                    verify: bool = True) -> Path:
+    """Atomically write ``state`` as the checkpoint for ``step``, checksum it, then prune old ones.
+
+    Older checkpoints are deleted only after the new file is complete and its checksum is
+    written, so at every moment at least one good checkpoint exists.
+    """
     d = Path(ckpt_dir)
     d.mkdir(parents=True, exist_ok=True)
     final = checkpoint_path(d, step)
@@ -79,6 +140,8 @@ def save_checkpoint(ckpt_dir: str | os.PathLike, step: int, state: dict, keep_la
     state["format"] = CKPT_FORMAT
     state["step"] = int(step)
     _atomic_torch_save(state, final)
+    if verify:
+        write_checksum(final)
     prune_checkpoints(d, keep_last)
     return final
 
@@ -134,6 +197,10 @@ def prune_checkpoints(ckpt_dir: str | os.PathLike, keep_last: int) -> list[Path]
             removed.append(path)
         except OSError:
             pass
+        try:
+            path.with_name(path.name + SUM_SUFFIX).unlink(missing_ok=True)
+        except OSError:
+            pass
     return removed
 
 
@@ -143,6 +210,9 @@ def load_checkpoint(path: str | os.PathLike, map_location: Any = "cpu") -> dict:
     ``weights_only=False`` is required because checkpoints carry Python/NumPy RNG state
     and config dicts. Only load checkpoints you created yourself.
     """
+    ok, why = verify_checkpoint(path)
+    if not ok:
+        raise ValueError(f"{path} failed verification: {why}")
     state = torch.load(path, map_location=map_location, weights_only=False)
     if not isinstance(state, dict) or "model" not in state or "step" not in state:
         raise ValueError(f"{path} is not a Sapia checkpoint")

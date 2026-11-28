@@ -91,6 +91,9 @@ class ModelConfig:
         return 6.0 * self.num_params() + 12.0 * self.n_layer * self.d_model * (context or self.block_size)
 
 
+BACKENDS = ("auto", "cpu", "gpu", "tpu", "tpu-jax")
+
+
 @dataclass
 class TrainConfig:
     preset: str = F("sapia", "Name of the preset this config started from (informational).")
@@ -158,6 +161,15 @@ class TrainConfig:
     tpu: bool = F(False, "Train on TPU chips with PyTorch/XLA (SPMD over all chips; see sapia.train_tpu).")
     tpu_tokens_per_chip: int = F(2048, "TPU: tokens per chip per micro-batch (lower it if the TPU runs out of memory).")
     tpu_flash: bool = F(True, "TPU: use the Pallas flash-attention kernel (falls back automatically).")
+    backend: str = F("auto", "auto (GPU if available, else CPU) | cpu | gpu | tpu (PyTorch/XLA) | tpu-jax (JAX). "
+                             "Shortcuts: --cpu, --gpu, --tpu, --tpu-jax. Checkpoints work across all of them.")
+    tpu_sharding: str = F("zero2", "tpu-jax: how weights and gradients are split over the chips. zero2 (bf16 weights "
+                                   "gathered once per step, gradients reduce-scattered per micro-batch) | dp (gradients "
+                                   "summed locally, one reduce-scatter per step: fastest, most memory) | fsdp (weights "
+                                   "gathered per micro-batch: least memory). python -m sapia.bench_tpu picks the fastest.")
+    tpu_remat: str = F("none", "tpu-jax: recompute activations in the backward pass. none | dots (keep matmul outputs, "
+                               "recompute the cheap rest: less memory, a few % slower) | full (least memory, ~30% slower).")
+    tpu_xla_flags: bool = F(True, "tpu-jax: set LIBTPU_INIT_ARGS for overlapping communication with compute.")
     wandb: bool = F(False, "Log to Weights & Biases if the package is installed (never required).")
     wandb_project: str = F("sapia", "Weights & Biases project name.")
     ntfy_topic: Optional[str] = F(None, "ntfy.sh topic for phone notifications (auto = $SAPIA_NTFY_TOPIC or off).")
@@ -184,6 +196,29 @@ class TrainConfig:
             raise ConfigError("learning_rate must be positive")
         if self.tpu_tokens_per_chip < 1:
             raise ConfigError("tpu_tokens_per_chip must be >= 1")
+        if self.tpu_sharding not in ("zero2", "dp", "fsdp"):
+            raise ConfigError(f"tpu_sharding must be zero2|dp|fsdp, got {self.tpu_sharding!r}")
+        if isinstance(self.tpu_remat, bool):
+            self.tpu_remat = "full" if self.tpu_remat else "none"
+        if self.tpu_remat not in ("none", "dots", "full"):
+            raise ConfigError(f"tpu_remat must be none|dots|full, got {self.tpu_remat!r}")
+        self.backend = self.backend.replace("_", "-").lower()
+        if self.backend not in BACKENDS:
+            raise ConfigError(f"backend must be one of {BACKENDS}, got {self.backend!r}")
+        if self.tpu:                                     # the original --tpu flag
+            if self.backend not in ("auto", "tpu"):
+                raise ConfigError(f"--tpu conflicts with backend={self.backend}")
+            self.backend = "tpu"
+        self.tpu = self.backend == "tpu"
+        if self.backend == "cpu":
+            if self.device.startswith("cuda"):
+                raise ConfigError("--cpu conflicts with device=" + self.device)
+            self.device = "cpu"
+        elif self.backend == "gpu":
+            if self.device == "cpu":
+                raise ConfigError("--gpu conflicts with device=cpu")
+            if self.device == "auto":
+                self.device = "cuda"
         if self.optimizer not in ("muon", "adamw"):
             raise ConfigError(f"optimizer must be muon|adamw, got {self.optimizer!r}")
         if self.main_block_size is not None:
@@ -409,6 +444,10 @@ def parse_train_args(argv: Optional[list[str]] = None) -> TrainConfig:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", default=None, help="YAML file with overrides (see configs/).")
+    for flag, value in (("--cpu", "cpu"), ("--gpu", "gpu"), ("--tpu-jax", "tpu-jax")):
+        parser.add_argument(flag, *(["--tpu_jax"] if value == "tpu-jax" else []), dest="backend",
+                            action="store_const", const=value, default=argparse.SUPPRESS,
+                            help=f"Shortcut for --backend {value}.")
     add_config_args(parser, TrainConfig)
     ns = vars(parser.parse_args(argv))
     config_path = ns.pop("config", None)

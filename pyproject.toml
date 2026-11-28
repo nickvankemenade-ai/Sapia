@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+jax = ["jax"]          # --tpu-jax; on a TPU VM install "jax[tpu]" (see docs/KAGGLE.md)
 
 [tool.setuptools]
 packages = ["sapia"]
