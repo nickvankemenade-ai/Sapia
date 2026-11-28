@@ -88,6 +88,8 @@ class PrepConfig:
     max_files: Optional[int] = F(None, "Use only the first N source files.")
     max_retries: int = F(5, "Retries per source file on transient (network) errors, with exponential backoff.")
     progress_seconds: float = F(30.0, "Seconds between progress lines.")
+    stall_minutes: float = F(15.0, "With worker processes: exit (code 75, resumable) if no tokens arrive for this "
+                                   "long (0 disables).")
 
     def bucket_range(self) -> tuple[int, int]:
         lo, hi = (int(x) for x in self.bucket.split(","))
@@ -192,12 +194,55 @@ class TokenBudget:
             self.counter.value = max(0, int(self.counter.value) - int(tokens))
 
 
+STALL_EXIT_CODE = 75   # "temporary failure": rerun the same command to resume
+
+
+def start_stall_watchdog(heartbeat, stall_minutes: float, log: Callable[[str], None],
+                         stop: threading.Event) -> Optional[threading.Thread]:
+    """Exit the whole job if the workers stop reading documents for ``stall_minutes``.
+
+    ``heartbeat`` is a shared counter every worker bumps after each batch of rows it reads
+    (also rows its filters skip, so heavy filtering never looks like a stall). A worker can hang
+    without raising: a network read that never returns, or a worker killed while holding the
+    token counter's lock, which then blocks everyone, including this process's progress logging.
+    The watchdog runs on its own thread and reads the heartbeat without any lock, so it still
+    works in exactly those cases. On a stall it kills the worker processes and exits with code
+    75; committed work is on disk, so rerunning the same command resumes.
+    """
+    if not stall_minutes or stall_minutes <= 0:
+        return None
+    raw = heartbeat.get_obj()
+
+    def watch() -> None:
+        last, since = raw.value, time.monotonic()
+        while not stop.wait(min(30.0, stall_minutes * 60 / 4)):
+            now = raw.value
+            if now != last:
+                last, since = now, time.monotonic()
+                continue
+            if time.monotonic() - since >= stall_minutes * 60:
+                log(f"[prep] STALLED: no documents read for {stall_minutes:g} minutes; stopping the "
+                    f"workers and exiting with code {STALL_EXIT_CODE}. Rerun the same command to resume.")
+                for child in mp.active_children():
+                    try:
+                        child.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
+                os._exit(STALL_EXIT_CODE)
+
+    thread = threading.Thread(target=watch, name="prep-stall-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
 _WORKER_BUDGET: Optional[TokenBudget] = None
+_WORKER_HEARTBEAT = None
 
 
-def _init_worker(counter, target: int) -> None:
-    global _WORKER_BUDGET
+def _init_worker(counter, target: int, heartbeat=None) -> None:
+    global _WORKER_BUDGET, _WORKER_HEARTBEAT
     _WORKER_BUDGET = TokenBudget(target, counter)
+    _WORKER_HEARTBEAT = heartbeat.get_obj() if heartbeat is not None else None
 
 
 # ----------------------------------------------------------------------------- per-file work
@@ -446,6 +491,8 @@ def _stream_file(task: FileTask, state: dict, tok, budget: TokenBudget,
         keys = list(batch)
         n_rows = len(batch[keys[0]]) if keys else 0
         rows = [{k: batch[k][i] for k in keys} for i in range(n_rows)]
+        if _WORKER_HEARTBEAT is not None:
+            _WORKER_HEARTBEAT.value += n_rows        # lock-free on purpose (see start_stall_watchdog)
         for ids in encode_docs([doc_fn(r) for r in rows], tok, task.threads):
             if ids:
                 arr = np.empty(len(ids) + 1, dtype=SHARD_DTYPE)
@@ -707,8 +754,11 @@ def run_prepare(cfg: PrepConfig, *, resources: Optional[Resources] = None,
         ctx = mp.get_context("spawn")  # same start method everywhere; safe with threads in the parent
         counter = ctx.Value("q", done_tokens)
         budget = TokenBudget(cfg.target_tokens, counter)
-        with cf.ProcessPoolExecutor(max_workers=plan.num_workers, mp_context=ctx,
-                                    initializer=_init_worker, initargs=(counter, cfg.target_tokens)) as pool:
+        heartbeat = ctx.Value("q", 0)
+        stop_watchdog = threading.Event()
+        start_stall_watchdog(heartbeat, cfg.stall_minutes, log, stop_watchdog)
+        with cf.ProcessPoolExecutor(max_workers=plan.num_workers, mp_context=ctx, initializer=_init_worker,
+                                    initargs=(counter, cfg.target_tokens, heartbeat)) as pool:
             futures = {pool.submit(process_file, make_task(i)): i for i in pending}
             not_done = set(futures)
             try:
@@ -728,6 +778,8 @@ def run_prepare(cfg: PrepConfig, *, resources: Optional[Resources] = None,
                 for fut in not_done:
                     fut.cancel()
                 raise
+            finally:
+                stop_watchdog.set()
 
     states = read_states()
     total = sum(s["train_tokens"] for s in states)

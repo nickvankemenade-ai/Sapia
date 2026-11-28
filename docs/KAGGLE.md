@@ -15,6 +15,32 @@ Three CPU notebooks (or three versions of one) run `python -m sapia.prepare_mix 
 finished output into a dataset: open the version → **Output** → **New Dataset**, named for example
 `sapia-data-1`, `sapia-data-2`, `sapia-data-3`.
 
+Use this cell, so that a hung download restarts by itself: if the workers stop reading for 15
+minutes, prep exits with code 75 and the loop starts it again, resuming from what is on disk.
+
+```python
+import os, subprocess
+try:
+    from kaggle_secrets import UserSecretsClient
+    os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
+    print("HF_TOKEN set")
+except Exception as e:
+    print("no HF_TOKEN secret attached to this notebook:", e)
+!git clone -q -b design/architecture https://github.com/nickvankemenade-ai/Sapia.git
+%cd Sapia
+!pip install -q tokenizers
+ONLY = "reddit,finemath,gutenberg,fineweb_edu_top,ultrachat,stackexchange_top,reddit_top,wikipedia_anneal,finemath_top,dclm_anneal"
+for attempt in range(1, 11):
+    r = subprocess.run(["python", "-m", "sapia.prepare_mix", "--total_tokens", "16e9", "--out_dir",
+                        "/kaggle/working/sapia-mix", "--num_workers", "4", "--only", ONLY])
+    print(f"=== attempt {attempt}: exit code {r.returncode}", flush=True)
+    if r.returncode == 0:
+        break
+```
+
+The log must not say "sending unauthenticated requests"; if it does, the `HF_TOKEN` secret is
+not attached to this notebook (Add-ons → Secrets → tick it for this notebook).
+
 ## 2. The training notebook (one notebook, one new version per session)
 
 Create a notebook `sapia-train`:

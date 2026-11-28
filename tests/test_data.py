@@ -387,3 +387,36 @@ def test_prep_on_progress_hook_is_called(tmp_path, parquet_corpus):
     run_prepare(_prep_cfg(tmp_path / "out", pattern, target_tokens=12000), log=_quiet,
                 on_progress=lambda m: seen.append(m["train_tokens"]))
     assert len(seen) >= 2 and seen == sorted(seen) and seen[-1] >= 12000
+
+
+def _run_watchdog_script(stop_early: bool) -> int:
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent(f"""
+        import multiprocessing as mp, threading, time, sys
+        sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
+        from sapia.prepare_data import start_stall_watchdog
+        hb = mp.get_context("spawn").Value("q", 0)
+        stop = threading.Event()
+        start_stall_watchdog(hb, 0.01, print, stop)       # 0.6 s without a heartbeat = stalled
+        if {stop_early}:
+            stop.set()
+        time.sleep(3)
+        print("still alive")
+    """)
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=60).returncode
+
+
+def test_stall_watchdog_exits_resumably_when_workers_hang():
+    from sapia.prepare_data import STALL_EXIT_CODE
+
+    assert _run_watchdog_script(stop_early=False) == STALL_EXIT_CODE
+    assert _run_watchdog_script(stop_early=True) == 0          # stopped after a normal finish: no exit
+
+
+def test_heartbeat_keeps_the_watchdog_quiet_during_parallel_prep(tmp_path, parquet_corpus):
+    pattern, _ = parquet_corpus
+    manifest = run_prepare(_prep_cfg(tmp_path / "out", pattern, num_workers=2, stall_minutes=5.0), log=_quiet)
+    assert manifest["complete"] is True
