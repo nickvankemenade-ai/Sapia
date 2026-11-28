@@ -491,6 +491,7 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
             compiled = True
 
     notify = Notifier(cfg.ntfy_topic, run=out_dir.name, log=log)
+    pinger = notify.every(cfg.notify_minutes)
     wandb_run = None
     wandb_ready = bool(os.environ.get("WANDB_API_KEY")) or (
         Path.home().joinpath(".netrc").exists() and "api.wandb.ai" in Path.home().joinpath(".netrc").read_text())
@@ -858,6 +859,7 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
                 if precision.use_scaler:
                     record["scaler_scale"] = scaler.get_scale()
                 append_jsonl(metrics_path, record)
+                pinger.maybe(step, tokens_seen, horizon, mean_loss, tok_per_sec, last_val, mfu)
                 remaining = max(0, horizon - tokens_seen)
                 eta = remaining / tok_per_sec if tok_per_sec > 0 else float("inf")
                 report.add(record)

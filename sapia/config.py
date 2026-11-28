@@ -177,6 +177,7 @@ class TrainConfig:
     wandb_project: str = F("sapia", "Weights & Biases project name.")
     ntfy_topic: Optional[str] = F(None, "ntfy.sh topic for phone notifications (auto = $SAPIA_NTFY_TOPIC or off).")
     notify_every_tokens: int = F(1_000_000_000, "Send a progress notification every N tokens.")
+    notify_minutes: float = F(15.0, "Send a silent loss update to the phone every N minutes (0 = off; needs ntfy).")
     peak_flops: Optional[float] = F(None, "GPU peak FLOP/s for the MFU estimate. auto = lookup by GPU name.")
     dry_run: bool = F(False, "Detect resources, plan batch/data settings, print them and exit without training.")
 
@@ -233,6 +234,8 @@ class TrainConfig:
             raise ConfigError(f"lr_schedule must be wsd|cosine, got {self.lr_schedule!r}")
         if not 0.0 <= self.anneal_fraction < 1.0:
             raise ConfigError("anneal_fraction must be in [0, 1)")
+        if self.notify_minutes < 0:
+            raise ConfigError("notify_minutes must be >= 0")
         if self.notify_every_tokens < 1:
             raise ConfigError("notify_every_tokens must be >= 1")
         for name in ("eval_interval", "log_interval", "ckpt_interval", "max_nan_skips", "max_batch_size"):

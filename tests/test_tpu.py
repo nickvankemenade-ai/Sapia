@@ -150,3 +150,86 @@ def test_kaggle_merge_leaves_out_a_phase_without_data(tmp_path):
     _write_mix(inputs / "sapia-prep-1", {"fineweb_edu": "main"})
     merged = merge_mixes(find_mixes(inputs), tmp_path / "merged", log=lambda s: None)
     assert list(merged["phases"]) == ["main"]
+
+
+def test_progress_pinger_sends_loss_and_average_mfu(monkeypatch):
+    from sapia import notify as notify_mod
+
+    sent = []
+    n = notify_mod.Notifier("test-topic", run="run")
+    monkeypatch.setattr(n, "send", lambda msg, priority="default": sent.append((msg, priority)))
+    clock = [1000.0]
+    monkeypatch.setattr(notify_mod.time, "time", lambda: clock[0])
+    p = n.every(15)
+    assert not p.maybe(10, 0, 16_000_000_000, 4.2, 100_000, mfu=0.30)                 # baseline, too soon
+    # 1M tokens at 100K tok/s (10 s, MFU 30%), then 3M tokens at 300K tok/s (10 s, MFU 50%)
+    assert not p.maybe(20, 1_000_000, 16_000_000_000, 4.0, 100_000, mfu=0.30)
+    clock[0] += 15 * 60 + 1
+    assert p.maybe(30, 4_000_000, 16_000_000_000, 3.141, 300_000, val=3.2, mfu=0.50)
+    msg, prio = sent[-1]
+    assert "loss 3.141" in msg and "val 3.200" in msg and "4.00M/16.00B" in msg
+    assert "MFU 40.0% (avg since last message)" in msg and "200.00K tok/s avg" in msg   # time-weighted
+    assert prio == "low" and not p.maybe(31, 4_100_000, 16_000_000_000, 3.1, 300_000, mfu=0.5)
+    assert not notify_mod.Notifier(None).every(15).maybe(1, 1, 2, 1.0, 1.0)             # no topic: nothing sent
+
+
+@pytest.fixture
+def kaggle_env(tmp_path, monkeypatch):
+    """A fake Kaggle machine: one attached data dataset, an empty working dir, no network."""
+    from sapia import kaggle as kg
+
+    inputs, work = tmp_path / "input", tmp_path / "working"
+    _write_mix(inputs / "sapia-data-1", {"fineweb_edu": "main"})
+    work.mkdir()
+    monkeypatch.setattr(kg, "INPUT_ROOT", inputs)
+    monkeypatch.setattr(kg, "WORK_ROOT", work)
+    monkeypatch.setattr(kg, "load_secrets", lambda log=print: [])
+    monkeypatch.setattr(kg, "ensure_packages", lambda backend, log=print: None)
+    prev = tmp_path / "previous"
+    monkeypatch.setattr(kg, "Path", lambda p: prev if p == "/tmp/sapia-previous" else (tmp_path / "mix" if p == "/tmp/sapia-mix" else Path(p)))
+    calls = []
+    monkeypatch.setattr(kg.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or type("R", (), {"returncode": 0})())
+    return kg, inputs, work, prev, calls
+
+
+def _fake_ckpt(run_dir: Path, step: int) -> None:
+    d = run_dir / "checkpoints"
+    d.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": {}, "step": step}, d / f"ckpt_{step:09d}.pt")
+    (run_dir / "metrics.jsonl").write_text('{"kind": "train", "step": %d}\n' % step)
+
+
+def test_kaggle_session_resumes_from_its_previous_output(kaggle_env, monkeypatch):
+    kg, inputs, work, prev, calls = kaggle_env
+    monkeypatch.setattr(kg, "fetch_previous_output", lambda k, dest, log=print: _fake_ckpt(dest / "run", 900) or True)
+    _fake_ckpt(inputs / "old-version" / "run", 300)                  # an older attached version loses
+    assert kg.run_session(2.0, log=lambda s: None) == 0
+    cmd = calls[-1]
+    assert cmd[cmd.index("--resume") + 1] == str(prev / "run" / "checkpoints")
+    assert cmd[cmd.index("--max_hours") + 1] == "2.0" and cmd[cmd.index("--backend") + 1] == "tpu-jax"
+    assert "16e9" in cmd and (work / "run" / "metrics.jsonl").exists()          # history carried over
+    assert json.loads((work / "run" / "session.json").read_text())["resumed_step"] == 900
+
+
+def test_kaggle_session_first_run_and_refusals(kaggle_env, monkeypatch):
+    kg, inputs, work, prev, calls = kaggle_env
+    quiet = lambda s: None
+    monkeypatch.setattr(kg, "fetch_previous_output", lambda k, dest, log=print: True)   # API works, nothing yet
+    assert kg.run_session(2.0, log=quiet) == 0 and calls[-1][calls[-1].index("--resume") + 1] == "auto"
+    calls.clear()
+    monkeypatch.setattr(kg, "fetch_previous_output", lambda k, dest, log=print: None)   # no API secrets
+    assert kg.run_session(2.0, log=quiet) == 2 and not calls                          # can't tell: refuse
+    assert kg.run_session(2.0, fresh=True, log=quiet) == 0
+    calls.clear()
+
+    def broken(k, dest, log=print):
+        raise RuntimeError("401 unauthorized")
+    monkeypatch.setattr(kg, "fetch_previous_output", broken)
+    assert kg.run_session(2.0, fresh=True, log=quiet) == 2 and not calls              # API error: always refuse
+
+    def failed_last_time(k, dest, log=print):                         # last session started at 900, saved nothing
+        (dest / "run").mkdir(parents=True, exist_ok=True)
+        (dest / "run" / "session.json").write_text('{"resumed_step": 900}')
+        return True
+    monkeypatch.setattr(kg, "fetch_previous_output", failed_last_time)
+    assert kg.run_session(2.0, log=quiet) == 2 and not calls

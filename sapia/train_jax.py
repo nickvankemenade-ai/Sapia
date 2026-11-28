@@ -370,6 +370,7 @@ def _train_jax(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None], stop
     atomic_write_json(out_dir / "config.json", {"train_config": cfg.to_dict(), "n_params": n_params,
                                                 "backend": describe, "plan": plan, "jax": jax.__version__})
     notify = Notifier(cfg.ntfy_topic, run=out_dir.name, log=log)
+    pinger = notify.every(0.0 if bench else cfg.notify_minutes)
 
     def phase_for(tokens: int) -> str:
         return "anneal" if tokens >= switch and "anneal" in phases else "main"
@@ -514,6 +515,7 @@ def _train_jax(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None], stop
                 append_jsonl(metrics_path, {"kind": "train", "step": step, "tokens_seen": tokens_seen, "phase": phase,
                                             "loss": loss_val, "lr": lr_f, "grad_norm": gn, "tok_per_sec": tps,
                                             "mfu": mfu, "train_time_s": train_time(), "time_unix": time.time()})
+                pinger.maybe(step, tokens_seen, horizon, loss_val, tps, last_val, mfu)
                 eta = (horizon - tokens_seen) / tps if tps > 0 else float("inf")
                 log(f"step {step:>7d} | loss {loss_val:.4f} | lr {lr_f:.2e} | gnorm {gn:.2f} | {fmt_count(tps)} tok/s"
                     + (f" | mfu {100 * mfu:.1f}%" if mfu else "")

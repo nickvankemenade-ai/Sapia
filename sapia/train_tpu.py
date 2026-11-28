@@ -339,6 +339,7 @@ def _train_tpu(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None], be,
     atomic_write_json(out_dir / "config.json", {"train_config": cfg.to_dict(), "n_params": n_params,
                                                 "backend": be.describe(), "plan": plan, "torch": torch.__version__})
     notify = Notifier(cfg.ntfy_topic, run=out_dir.name, log=log)
+    pinger = notify.every(cfg.notify_minutes)
 
     def phase_for(tokens: int) -> str:
         return "anneal" if tokens >= switch and "anneal" in phases else "main"
@@ -495,6 +496,7 @@ def _train_tpu(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None], be,
                        "lr": lr, "grad_norm": gn, "tok_per_sec": tps, "mfu": mfu, "train_time_s": train_time(),
                        "time_unix": time.time()}
                 append_jsonl(metrics_path, rec)
+                pinger.maybe(step, tokens_seen, horizon, loss_val, tps, last_val, mfu)
                 eta = (horizon - tokens_seen) / tps if tps > 0 else float("inf")
                 log(f"step {step:>7d} | loss {loss_val:.4f} | lr {lr:.2e} | gnorm {gn:.2f} | {fmt_count(tps)} tok/s"
                     + (f" | mfu {100 * mfu:.1f}%" if mfu else "")

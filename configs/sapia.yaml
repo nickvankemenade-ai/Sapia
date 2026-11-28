@@ -85,6 +85,7 @@ tpu_xla_flags: true        # tpu-jax: libtpu flags that overlap communication wi
 wandb: true
 wandb_project: sapia
 ntfy_topic: auto           # or set SAPIA_NTFY_TOPIC
+notify_minutes: 15.0       # silent loss update to the phone every N minutes (0 = off)
 notify_every_tokens: 1_000_000_000
 peak_flops: auto
 dry_run: false
