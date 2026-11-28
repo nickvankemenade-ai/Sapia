@@ -15,28 +15,52 @@ Three CPU notebooks (or three versions of one) run `python -m sapia.prepare_mix 
 finished output into a dataset: open the version → **Output** → **New Dataset**, named for example
 `sapia-data-1`, `sapia-data-2`, `sapia-data-3`.
 
-Use this cell, so that a hung download restarts by itself: if the workers stop reading for 15
-minutes, prep exits with code 75 and the loop starts it again, resuming from what is on disk.
+Use this cell, so that a hang restarts by itself. Prep writes its log to a file (never straight
+into Kaggle's log pipe, which can stall); the cell copies new lines into the notebook log and, if
+the file stops growing for 20 minutes (prep prints a line every 30 s), kills prep and starts it
+again, resuming from what is on disk. Prep's own watchdog (exit code 75 after 15 minutes without
+reading documents) does the same from the inside.
 
 ```python
-import os, subprocess
+import os, signal, subprocess, sys, time
 try:
     from kaggle_secrets import UserSecretsClient
     os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
     print("HF_TOKEN set")
 except Exception as e:
     print("no HF_TOKEN secret attached to this notebook:", e)
-!git clone -q -b design/architecture https://github.com/nickvankemenade-ai/Sapia.git
-%cd Sapia
+!git clone -q -b design/architecture https://github.com/nickvankemenade-ai/Sapia.git /tmp/Sapia
+%cd /tmp/Sapia
 !pip install -q tokenizers
 ONLY = "reddit,finemath,gutenberg,fineweb_edu_top,ultrachat,stackexchange_top,reddit_top,wikipedia_anneal,finemath_top,dclm_anneal"
-for attempt in range(1, 11):
-    r = subprocess.run(["python", "-m", "sapia.prepare_mix", "--total_tokens", "16e9", "--out_dir",
-                        "/kaggle/working/sapia-mix", "--num_workers", "4", "--only", ONLY])
-    print(f"=== attempt {attempt}: exit code {r.returncode}", flush=True)
-    if r.returncode == 0:
+CMD = [sys.executable, "-u", "-m", "sapia.prepare_mix", "--total_tokens", "16e9", "--out_dir",
+       "/kaggle/working/sapia-mix", "--num_workers", "4", "--only", ONLY]
+LOG, QUIET_MINUTES = "/tmp/prep.log", 20
+for attempt in range(1, 21):
+    pos = os.path.getsize(LOG) if os.path.exists(LOG) else 0
+    with open(LOG, "ab") as f:
+        p = subprocess.Popen(CMD, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+    changed = time.time()
+    while p.poll() is None:
+        time.sleep(15)
+        size = os.path.getsize(LOG)
+        if size != pos:
+            with open(LOG, "rb") as f:
+                f.seek(pos)
+                print(f.read(size - pos).decode(errors="replace"), end="", flush=True)
+            pos, changed = size, time.time()
+        elif time.time() - changed > QUIET_MINUTES * 60:
+            print(f"=== no output for {QUIET_MINUTES} min: killing attempt {attempt}", flush=True)
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+    print(f"=== attempt {attempt}: exit code {p.returncode}", flush=True)
+    if p.returncode == 0:
         break
 ```
+
+The repo is cloned into `/tmp`, so the notebook's output (and the dataset made from it) holds only
+`sapia-mix/`. Every data dataset should look the same: `sapia-mix/mix.json` plus
+`sapia-mix/<phase>/<source>/`.
 
 The log must not say "sending unauthenticated requests"; if it does, the `HF_TOKEN` secret is
 not attached to this notebook (Add-ons → Secrets → tick it for this notebook).

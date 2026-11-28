@@ -221,8 +221,12 @@ def start_stall_watchdog(heartbeat, stall_minutes: float, log: Callable[[str], N
                 last, since = now, time.monotonic()
                 continue
             if time.monotonic() - since >= stall_minutes * 60:
-                log(f"[prep] STALLED: no documents read for {stall_minutes:g} minutes; stopping the "
-                    f"workers and exiting with code {STALL_EXIT_CODE}. Rerun the same command to resume.")
+                # Log from a side thread: if stdout itself is what hangs, the exit must still happen.
+                msg = (f"[prep] STALLED: no documents read for {stall_minutes:g} minutes; stopping the "
+                       f"workers and exiting with code {STALL_EXIT_CODE}. Rerun the same command to resume.")
+                t = threading.Thread(target=log, args=(msg,), daemon=True)
+                t.start()
+                t.join(10.0)
                 for child in mp.active_children():
                     try:
                         child.kill()
