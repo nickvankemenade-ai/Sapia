@@ -155,6 +155,9 @@ class TrainConfig:
     max_nan_skips: int = F(10, "Abort after this many consecutive optimizer steps skipped for non-finite loss/grads.")
     seed: int = F(1337, "Random seed.")
     device: str = F("auto", "auto | cuda | cuda:N | cpu.")
+    tpu: bool = F(False, "Train on TPU chips with PyTorch/XLA (SPMD over all chips; see sapia.train_tpu).")
+    tpu_tokens_per_chip: int = F(2048, "TPU: tokens per chip per micro-batch (lower it if the TPU runs out of memory).")
+    tpu_flash: bool = F(True, "TPU: use the Pallas flash-attention kernel (falls back automatically).")
     wandb: bool = F(False, "Log to Weights & Biases if the package is installed (never required).")
     wandb_project: str = F("sapia", "Weights & Biases project name.")
     ntfy_topic: Optional[str] = F(None, "ntfy.sh topic for phone notifications (auto = $SAPIA_NTFY_TOPIC or off).")
@@ -179,6 +182,8 @@ class TrainConfig:
             raise ConfigError("keep_last must be >= 1")
         if self.learning_rate <= 0:
             raise ConfigError("learning_rate must be positive")
+        if self.tpu_tokens_per_chip < 1:
+            raise ConfigError("tpu_tokens_per_chip must be >= 1")
         if self.optimizer not in ("muon", "adamw"):
             raise ConfigError(f"optimizer must be muon|adamw, got {self.optimizer!r}")
         if self.main_block_size is not None:

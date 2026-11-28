@@ -74,6 +74,9 @@ resume: auto
 max_nan_skips: 10
 seed: 1337
 device: auto
+tpu: false                 # --tpu: train on TPU chips with PyTorch/XLA (Kaggle)
+tpu_tokens_per_chip: 2048  # TPU micro-batch per chip; lower if the TPU runs out of memory
+tpu_flash: true
 wandb: true
 wandb_project: sapia
 ntfy_topic: auto           # or set SAPIA_NTFY_TOPIC

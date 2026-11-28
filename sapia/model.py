@@ -30,6 +30,10 @@ def _sdpa_supports_gqa() -> bool:
 
 _SDPA_HAS_GQA = _sdpa_supports_gqa()
 
+# Optional replacement for causal self-attention over whole sequences (no KV cache):
+# ``fn(q, k, v) -> y`` with q (B, H, T, hd) and k, v (B, KV, T, hd). Set by sapia.train_tpu.
+ATTENTION_OVERRIDE = None
+
 
 class RMSNorm(nn.Module):
     """Root-mean-square norm with a learned gain and no bias, computed in float32."""
@@ -139,7 +143,10 @@ class CausalSelfAttention(nn.Module):
             attn_mask = torch.arange(S, device=x.device).unsqueeze(0) <= q_pos   # (T, S)
 
         dropout_p = self.dropout if self.training else 0.0
-        if KV != H and _SDPA_HAS_GQA:
+        if ATTENTION_OVERRIDE is not None and cache is None and is_causal and dropout_p == 0.0:
+            # Platform-specific causal attention for full sequences (e.g. a TPU flash kernel).
+            y = ATTENTION_OVERRIDE(q, k, v)
+        elif KV != H and _SDPA_HAS_GQA:
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p,
                                                is_causal=is_causal, enable_gqa=True)
         else:

@@ -284,6 +284,10 @@ def train(cfg: TrainConfig, *, after_checkpoint: Optional[Callable[[Path], None]
     ``_stop_after_steps`` is a test hook that simulates a stop signal after N steps.
     """
     cfg.validate()
+    if cfg.tpu:
+        from .train_tpu import train_tpu
+
+        return train_tpu(cfg, _stop_after_steps=_stop_after_steps)
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     logger = get_logger("sapia.train", out_dir / "train.log")
@@ -372,6 +376,13 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
         if list_checkpoints(ckpt_dir):
             raise ConfigError(f"resume=never but {ckpt_dir} already contains checkpoints; "
                               "use a new --out_dir or delete them")
+    elif Path(cfg.resume).is_dir():
+        # A folder (e.g. the previous Kaggle session's output): the newest checkpoint in it.
+        d = Path(cfg.resume)
+        d = d if list_checkpoints(d) else d / "checkpoints"
+        ckpt, ckpt_path = load_latest_checkpoint(d, log=log)
+        if ckpt is None:
+            raise ConfigError(f"no checkpoints found in {cfg.resume}")
     else:
         ckpt_path = Path(cfg.resume)
         ckpt = load_checkpoint(ckpt_path)

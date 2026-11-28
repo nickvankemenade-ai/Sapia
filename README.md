@@ -18,3 +18,7 @@ pytest
 ```
 
 Prepared data goes to `data/` (git-ignored). Keep it outside OneDrive for real runs.
+
+## Training on Kaggle TPUs
+
+`python -m sapia.train --tpu ...`: see [docs/KAGGLE.md](docs/KAGGLE.md) (sessions of ~9 hours that continue from each other).
