@@ -123,6 +123,9 @@ class TrainConfig:
     muon_momentum: float = F(0.95, "Muon momentum (Nesterov).")
     main_block_size: Optional[int] = F(1024, "Context length in the main phase (auto = model.block_size); "
                                              "the anneal phase uses model.block_size.")
+    max_source_epochs: Optional[float] = F(1.5, "Read no data source more than this many times per phase; a "
+                                                "source prepared short gives its excess share to the others "
+                                                "(auto = no limit).")
     learning_rate: float = F(5e-4, "Peak learning rate (shared by Muon and AdamW).")
     lr_schedule: str = F("wsd", "wsd (warmup, constant, linear decay over the last anneal_fraction) | cosine.")
     min_lr_ratio: float = F(0.0, "Final LR as a fraction of the peak.")
@@ -224,6 +227,8 @@ class TrainConfig:
         if self.main_block_size is not None:
             if not 1 <= self.main_block_size <= self.model.block_size or self.model.block_size % self.main_block_size:
                 raise ConfigError("main_block_size must divide model.block_size (e.g. 1024 for 2048)")
+        if self.max_source_epochs is not None and self.max_source_epochs <= 0:
+            raise ConfigError("max_source_epochs must be positive (or auto for no limit)")
         if self.lr_schedule not in ("wsd", "cosine"):
             raise ConfigError(f"lr_schedule must be wsd|cosine, got {self.lr_schedule!r}")
         if not 0.0 <= self.anneal_fraction < 1.0:

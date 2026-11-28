@@ -282,6 +282,30 @@ def _mix_sources(mix_dir: str | os.PathLike, phase: str) -> list[dict]:
     return mix["phases"][phase]["sources"]
 
 
+def cap_repeats(weights: np.ndarray, available: np.ndarray, phase_tokens: float, max_epochs: float) -> np.ndarray:
+    """Limit each source's share so it is read at most ``max_epochs`` times over the phase.
+
+    A source prepared short of its target (e.g. it ran out of documents) would otherwise be
+    repeated many times to keep its share. Its share is lowered to ``max_epochs * available /
+    phase_tokens`` and the freed share goes to the other sources in proportion to theirs.
+    """
+    w = np.asarray(weights, dtype=np.float64).copy()
+    allowed = max_epochs * np.asarray(available, dtype=np.float64) / float(phase_tokens)
+    capped = np.zeros(len(w), dtype=bool)
+    for _ in range(len(w)):
+        over = ~capped & (w > allowed + 1e-12)
+        if not over.any():
+            break
+        excess = float((w[over] - allowed[over]).sum())
+        w[over] = allowed[over]
+        capped |= over
+        free = ~capped
+        if not free.any() or w[free].sum() <= 0:
+            break
+        w[free] += excess * w[free] / w[free].sum()
+    return w / w.sum()
+
+
 class MixtureLoader:
     """Training batches drawn from several prepared sources in proportion to their shares.
 
@@ -293,10 +317,14 @@ class MixtureLoader:
 
     The position is ``{"phase", "batch", "positions": {source: [epoch, cursor]}}``; restoring
     it continues exactly where a checkpoint left off.
+
+    With ``phase_tokens`` and ``max_epochs``, no source is read more than ``max_epochs`` times
+    over the phase (see :func:`cap_repeats`).
     """
 
     def __init__(self, mix_dir: str | os.PathLike, phase: str, block_size: int, batch_size: int, seed: int,
-                 mode: str = "memmap", state: Optional[dict] = None):
+                 mode: str = "memmap", state: Optional[dict] = None, phase_tokens: Optional[float] = None,
+                 max_epochs: Optional[float] = None):
         self.phase = phase
         self.batch_size = int(batch_size)
         self.seed = int(seed)
@@ -317,12 +345,23 @@ class MixtureLoader:
             raise DataError(f"no prepared sources with data for phase {phase!r} in {mix_dir}")
         w = np.asarray(shares, dtype=np.float64)
         self.weights = w / w.sum()
+        self.capped: list[str] = []
+        if phase_tokens and max_epochs:
+            available = np.array([s.n_windows * block_size for s in self.shards], dtype=np.float64)
+            before = self.weights
+            self.weights = cap_repeats(self.weights, available, phase_tokens, max_epochs)
+            self.capped = [n for n, b, a in zip(self.names, before, self.weights) if a < b - 1e-9]
         self.missing_share = 1.0 - float(sum(shares)) if sum(shares) < 1.0 else 0.0
         self.batch = 0
         self.positions = {n: [0, 0] for n in self.names}
         self._perm_cache: dict[tuple[int, int], np.ndarray] = {}
         if state is not None:
             self.load_state(state)
+
+    def describe(self) -> str:
+        """The effective mix, e.g. ``fineweb_edu_top 33.1%, stackexchange_top 2.2% (capped)``."""
+        return ", ".join(f"{n} {100 * w:.1f}%" + (" (capped)" if n in self.capped else "")
+                         for n, w in zip(self.names, self.weights))
 
     # -- position
     def state(self) -> dict:

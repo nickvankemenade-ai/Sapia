@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import faulthandler
 import gc
 import glob
 import json
@@ -34,6 +35,7 @@ import multiprocessing as mp
 import os
 import platform
 import re
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -197,8 +199,25 @@ class TokenBudget:
 STALL_EXIT_CODE = 75   # "temporary failure": rerun the same command to resume
 
 
+STALLS_FILE = "stalls.json"     # in the state dir: {file index: number of times prep hung on it}
+SKIP_AFTER_STALLS = 2           # a file that hung this often is left as it is (its committed part is kept)
+
+
+def stalled_file(activity) -> Optional[int]:
+    """The started, unfinished source file that has gone longest without reading a batch."""
+    if activity is None:
+        return None
+    best, best_t = None, None
+    for i in range(len(activity)):
+        t = activity[i]
+        if t > 0 and (best_t is None or t < best_t):
+            best, best_t = i, t
+    return best
+
+
 def start_stall_watchdog(heartbeat, stall_minutes: float, log: Callable[[str], None],
-                         stop: threading.Event) -> Optional[threading.Thread]:
+                         stop: threading.Event, activity=None,
+                         on_stall: Optional[Callable[[Optional[int]], None]] = None) -> Optional[threading.Thread]:
     """Exit the whole job if the workers stop reading documents for ``stall_minutes``.
 
     ``heartbeat`` is a shared counter every worker bumps after each batch of rows it reads
@@ -227,6 +246,15 @@ def start_stall_watchdog(heartbeat, stall_minutes: float, log: Callable[[str], N
                 t = threading.Thread(target=log, args=(msg,), daemon=True)
                 t.start()
                 t.join(10.0)
+                if on_stall is not None:
+                    t = threading.Thread(target=on_stall, args=(stalled_file(activity),), daemon=True)
+                    t.start()
+                    t.join(10.0)
+                try:
+                    print("[prep] stack traces of the coordinator process:", file=sys.stderr, flush=True)
+                    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+                except Exception:  # noqa: BLE001
+                    pass
                 for child in mp.active_children():
                     try:
                         child.kill()
@@ -241,12 +269,26 @@ def start_stall_watchdog(heartbeat, stall_minutes: float, log: Callable[[str], N
 
 _WORKER_BUDGET: Optional[TokenBudget] = None
 _WORKER_HEARTBEAT = None
+_WORKER_ACTIVITY = None        # shared array: last time each source file read a batch (0 = idle, -1 = finished)
+_WORKER_TRACE_SECONDS = 0.0    # dump this worker's stack if one batch takes longer (diagnoses hangs)
 
 
-def _init_worker(counter, target: int, heartbeat=None) -> None:
-    global _WORKER_BUDGET, _WORKER_HEARTBEAT
+def _init_worker(counter, target: int, heartbeat=None, activity=None, trace_seconds: float = 0.0) -> None:
+    global _WORKER_BUDGET, _WORKER_HEARTBEAT, _WORKER_ACTIVITY, _WORKER_TRACE_SECONDS
     _WORKER_BUDGET = TokenBudget(target, counter)
     _WORKER_HEARTBEAT = heartbeat.get_obj() if heartbeat is not None else None
+    _WORKER_ACTIVITY = activity
+    _WORKER_TRACE_SECONDS = float(trace_seconds)
+
+
+def _alive(file_idx: int, value: Optional[float] = None) -> None:
+    """Record that this file just made progress (or, with value=-1, that it is finished)."""
+    if _WORKER_ACTIVITY is not None:
+        _WORKER_ACTIVITY[file_idx] = time.time() if value is None else value
+    if _WORKER_TRACE_SECONDS > 0:
+        faulthandler.cancel_dump_traceback_later()
+        if value is None:
+            faulthandler.dump_traceback_later(_WORKER_TRACE_SECONDS, repeat=False, file=sys.stderr)
 
 
 # ----------------------------------------------------------------------------- per-file work
@@ -409,6 +451,14 @@ def process_file(task: FileTask, budget: Optional[TokenBudget] = None,
     state = load_file_state(task.out_dir, task.file_idx, task.source["path"])
     if state["done"] or budget.remaining() <= 0:
         return state
+    _alive(task.file_idx)
+    try:
+        return _process_file(task, state, budget, on_commit)
+    finally:
+        _alive(task.file_idx, -1.0)
+
+
+def _process_file(task: FileTask, state: dict, budget: TokenBudget, on_commit) -> dict:
     tok = get_tokenizer(task.tokenizer)
     _limit_arrow_retention()
     failures = 0
@@ -497,6 +547,7 @@ def _stream_file(task: FileTask, state: dict, tok, budget: TokenBudget,
         rows = [{k: batch[k][i] for k in keys} for i in range(n_rows)]
         if _WORKER_HEARTBEAT is not None:
             _WORKER_HEARTBEAT.value += n_rows        # lock-free on purpose (see start_stall_watchdog)
+        _alive(task.file_idx)
         for ids in encode_docs([doc_fn(r) for r in rows], tok, task.threads):
             if ids:
                 arr = np.empty(len(ids) + 1, dtype=SHARD_DTYPE)
@@ -687,6 +738,25 @@ def run_prepare(cfg: PrepConfig, *, resources: Optional[Resources] = None,
     def read_states() -> list[dict]:
         return [load_file_state(out_dir, i, f["path"]) for i, f in enumerate(files)]
 
+    stalls_path = out_dir / STATE_DIR / STALLS_FILE
+    stalls = {int(k): int(v) for k, v in (read_json(stalls_path) if stalls_path.exists() else {}).items()}
+    for i, count in sorted(stalls.items()):
+        st = load_file_state(out_dir, i, files[i]["path"]) if i < len(files) else None
+        if st is not None and not st["done"] and count >= SKIP_AFTER_STALLS:
+            st["done"] = True
+            st["skipped"] = f"prep hung on this file {count} times"
+            atomic_write_json(file_state_path(out_dir, i), st)
+            log(f"[prep] skipping source file {i} ({files[i]['path']}): prep hung on it {count} times; keeping "
+                f"its {st['train_tokens']:,} committed tokens, the other files make up the rest")
+
+    def record_stall(file_idx: Optional[int]) -> None:
+        if file_idx is None:
+            return
+        stalls[file_idx] = stalls.get(file_idx, 0) + 1
+        atomic_write_json(stalls_path, {str(k): v for k, v in stalls.items()})
+        log(f"[prep] the stalled file is {file_idx} ({files[file_idx]['path']}); hang #{stalls[file_idx]} on it"
+            + (" -> it will be skipped on the next run" if stalls[file_idx] >= SKIP_AFTER_STALLS else ""))
+
     states = read_states()
     removed = clean_orphans(out_dir, states)
     if removed:
@@ -759,10 +829,13 @@ def run_prepare(cfg: PrepConfig, *, resources: Optional[Resources] = None,
         counter = ctx.Value("q", done_tokens)
         budget = TokenBudget(cfg.target_tokens, counter)
         heartbeat = ctx.Value("q", 0)
+        activity = ctx.Array("d", len(files), lock=False)
         stop_watchdog = threading.Event()
-        start_stall_watchdog(heartbeat, cfg.stall_minutes, log, stop_watchdog)
+        start_stall_watchdog(heartbeat, cfg.stall_minutes, log, stop_watchdog, activity=activity,
+                             on_stall=record_stall)
+        trace_s = cfg.stall_minutes * 60 * 0.8 if cfg.stall_minutes and cfg.stall_minutes > 0 else 0.0
         with cf.ProcessPoolExecutor(max_workers=plan.num_workers, mp_context=ctx, initializer=_init_worker,
-                                    initargs=(counter, cfg.target_tokens, heartbeat)) as pool:
+                                    initargs=(counter, cfg.target_tokens, heartbeat, activity, trace_s)) as pool:
             futures = {pool.submit(process_file, make_task(i)): i for i in pending}
             not_done = set(futures)
             try:

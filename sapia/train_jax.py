@@ -375,7 +375,11 @@ def _train_jax(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None], stop
         return "anneal" if tokens >= switch and "anneal" in phases else "main"
 
     def make_loader(ph: str) -> MixtureLoader:
-        return MixtureLoader(cfg.data_dir, ph, plan["ctx"][ph], plan["seqs"][ph], cfg.seed, state=loader_states.get(ph))
+        loader = MixtureLoader(cfg.data_dir, ph, plan["ctx"][ph], plan["seqs"][ph], cfg.seed,
+                               state=loader_states.get(ph), phase_tokens=switch if ph == "main" else horizon - switch,
+                               max_epochs=cfg.max_source_epochs)
+        log(f"data mix ({ph}): {loader.describe()}")
+        return loader
 
     phase = phase_for(tokens_seen)
     loader = make_loader(phase)

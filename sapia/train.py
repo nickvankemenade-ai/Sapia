@@ -547,8 +547,12 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
         # The micro-batch is planned in full-length sequences; shorter contexts take more of them,
         # so the tokens per micro-batch (and per optimizer step) stay the same.
         ctx = phase_ctx(phase)
-        return MixtureLoader(cfg.data_dir, phase, ctx, bplan.batch_size * (block // ctx), cfg.seed, mode=data_mode,
-                             state=loader_states.get(phase))
+        loader = MixtureLoader(cfg.data_dir, phase, ctx, bplan.batch_size * (block // ctx), cfg.seed, mode=data_mode,
+                               state=loader_states.get(phase),
+                               phase_tokens=switch if phase == "main" else horizon - switch,
+                               max_epochs=cfg.max_source_epochs)
+        log(f"data mix ({phase}): {loader.describe()}")
+        return loader
 
     phase = phase_for(tokens_seen)
     loader = make_loader(phase)

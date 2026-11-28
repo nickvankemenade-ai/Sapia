@@ -40,6 +40,7 @@ reuse_batch_plan: true
 optimizer: muon            # Muon for hidden matrices + AdamW for the rest; or adamw
 muon_momentum: 0.95
 main_block_size: 1024      # context in the main phase; the anneal phase uses model.block_size
+max_source_epochs: 1.5     # read no source more than 1.5 times per phase (short ones give up share)
 learning_rate: 5.0e-4
 lr_schedule: wsd           # warmup, constant, linear decay over the anneal phase
 min_lr_ratio: 0.0

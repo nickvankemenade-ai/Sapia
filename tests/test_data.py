@@ -420,3 +420,32 @@ def test_heartbeat_keeps_the_watchdog_quiet_during_parallel_prep(tmp_path, parqu
     pattern, _ = parquet_corpus
     manifest = run_prepare(_prep_cfg(tmp_path / "out", pattern, num_workers=2, stall_minutes=5.0), log=_quiet)
     assert manifest["complete"] is True
+
+
+def test_stalled_file_is_the_one_idle_longest():
+    from sapia.prepare_data import stalled_file
+
+    assert stalled_file([0.0, 105.0, -1.0, 100.0, 0.0]) == 3      # idle files (0) and finished ones (-1) ignored
+    assert stalled_file([0.0, -1.0]) is None and stalled_file(None) is None
+
+
+def test_file_that_hung_twice_is_skipped_and_the_target_still_reached(tmp_path, parquet_corpus):
+    import json as _json
+
+    from sapia.prepare_data import STALLS_FILE
+
+    pattern, _ = parquet_corpus
+    out2 = tmp_path / "out2"
+    run_prepare(_prep_cfg(out2, pattern, target_tokens=1), log=_quiet)          # pins the 3 source files
+    state_dir = out2 / "prep_state"
+    (state_dir / STALLS_FILE).write_text(_json.dumps({"1": 2, "2": 1}), encoding="utf-8")
+    for f in state_dir.glob("file_*.json"):                       # pretend nothing was prepared yet
+        f.unlink()
+    for f in out2.glob("*.bin"):
+        f.unlink()
+    lines: list[str] = []
+    manifest = run_prepare(_prep_cfg(out2, pattern, target_tokens=6000), log=lines.append)
+    assert any("skipping source file 1" in x for x in lines)
+    assert not any("skipping source file 2" in x for x in lines)  # hung only once: retried
+    assert manifest["source_files"][1]["docs_done"] == 0 and manifest["source_files"][1]["exhausted"]
+    assert manifest["train_tokens"] >= 6000

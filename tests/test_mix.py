@@ -150,3 +150,47 @@ def test_validation_sets_per_source(local_mix):
     vals = mixture_val_sets(out, "main", block_size=16)
     assert set(vals) == {"alpha", "beta"}
     assert vals["alpha"][0] == 0.75 and vals["alpha"][1].n_windows > 0
+
+
+def test_repeat_cap_with_the_real_anneal_mix():
+    import numpy as np
+
+    from sapia.data import cap_repeats
+
+    names = ["fineweb_edu_top", "ultrachat", "stackexchange_top", "reddit_top", "wikipedia_anneal", "finemath_top",
+             "dclm_anneal"]
+    shares = np.array([0.30, 0.20, 0.15, 0.10, 0.10, 0.10, 0.05])
+    have = np.array([480e6, 256e6, 23.56e6, 160e6, 160e6, 160e6, 80e6])        # what prep produced
+    w = dict(zip(names, cap_repeats(shares, have, 1.6e9, 1.5)))
+    assert abs(w["stackexchange_top"] * 1.6e9 - 1.5 * 23.56e6) < 1e5            # ~35M tokens, 1.5 passes
+    assert abs(sum(w.values()) - 1.0) < 1e-9
+    assert all(w[n] * 1.6e9 <= 1.5 * h + 1e5 for n, h in zip(names, have))      # nothing read > 1.5x
+    assert w["fineweb_edu_top"] / w["dclm_anneal"] == pytest.approx(6.0)       # the rest keep their ratios
+    assert cap_repeats(shares, have * 100, 1.6e9, 1.5) == pytest.approx(shares)  # enough data: unchanged
+
+
+def test_mixture_loader_applies_the_cap(tmp_path):
+    import json
+
+    import numpy as np
+
+    from sapia.data import MixtureLoader
+
+    from conftest import pattern_tokens, write_token_dataset
+
+    mix_dir = tmp_path / "mix"
+    srcs = []
+    for name, n, share in (("big", 20000, 0.5), ("small", 1000, 0.5)):
+        write_token_dataset(mix_dir / "main" / name, train=[pattern_tokens(n)], val=[pattern_tokens(200)])
+        srcs.append({"name": name, "share": share, "dir": f"main/{name}", "target_tokens": n, "prepared": True,
+                     "train_tokens": n, "val_tokens": 200})
+    (mix_dir / "mix.json").write_text(json.dumps({"version": 1, "total_tokens": 1, "anneal_fraction": 0.1,
+                                                  "tokenizer": "bytes", "phases": {"main": {"tokens": 1, "sources": srcs}}}))
+    plain = MixtureLoader(mix_dir, "main", 16, 8, seed=0)
+    capped = MixtureLoader(mix_dir, "main", 16, 8, seed=0, phase_tokens=20000, max_epochs=1.5)
+    assert plain.weights == pytest.approx([0.5, 0.5])
+    small = capped.names.index("small")
+    assert capped.weights[small] == pytest.approx(1.5 * capped.shards[small].n_windows * 16 / 20000)
+    assert "small" in capped.describe() and "(capped)" in capped.describe()
+    draws = np.concatenate([capped.next_batch()[1] for _ in range(200)])
+    assert abs((draws == small).mean() - capped.weights[small]) < 0.03
