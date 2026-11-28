@@ -1,6 +1,7 @@
-# Sapia architecture (proposal, v0)
+# Sapia architecture (v0)
 
-Status: **draft for discussion**. Nothing is implemented yet.
+Status: **implemented, superseded by the [v1 redesign](DESIGN_V1.md)** (1.045B parameters,
+Muon, deeper and thinner) for the free-compute budget. Kept for the reasoning behind the shared parts.
 
 Sapia is a ~1.2B-parameter decoder-only language model, pretrained from scratch on a curated English mix (see [DATA.md](DATA.md))
 on a single GH200 (H100 GPU, 96 GB) with a budget of roughly 100 GPU-hours.

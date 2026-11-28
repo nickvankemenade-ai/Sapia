@@ -107,6 +107,7 @@ def small_train_cfg(model_cfg: ModelConfig, data_dir: Path, out_dir: Path, **ove
         max_tokens=16 * 32 * 12, target_tokens_per_step=16 * 32, batch_size=16, grad_accum_steps=1,
         learning_rate=3e-3, warmup_tokens=16 * 32 * 2, eval_interval=6, eval_tokens=32 * 16,
         log_interval=2, ckpt_interval=6, ckpt_minutes=0.0, device="cpu", seed=7, compile=False,
+        main_block_size=None,
     )
     for key, value in overrides.items():
         setattr(cfg, key, value)

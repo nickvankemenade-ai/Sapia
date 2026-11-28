@@ -24,8 +24,9 @@ def test_sapia_yaml_lists_every_option():
 
 def test_presets():
     big, tiny = get_preset("sapia"), get_preset("tiny")
-    assert big.model.num_params() == 1_182_900_224
-    assert big.target_tokens_per_step == 1_048_576 and big.compile is True
+    assert big.model.num_params() == 1_045_145_472
+    assert big.target_tokens_per_step == 524_288 and big.compile is True
+    assert (big.optimizer, big.main_block_size, big.model.block_size) == ("muon", 1024, 2048)
     assert tiny.model.num_params() < 10_000_000 and tiny.compile is False
     with pytest.raises(ConfigError):
         get_preset("nope")

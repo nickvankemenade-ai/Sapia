@@ -103,6 +103,9 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = cfg.head_dim
         self.dropout = cfg.dropout
         self.qkv = nn.Linear(cfg.d_model, (cfg.n_head + 2 * cfg.n_kv_head) * cfg.head_dim, bias=False)
+        # Muon orthogonalises q, k and v separately (see sapia.muon).
+        self.qkv.weight.muon_split = [cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim,
+                                      cfg.n_kv_head * cfg.head_dim]
         self.proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.q_norm = RMSNorm(cfg.head_dim, cfg.norm_eps) if cfg.qk_norm else None
         self.k_norm = RMSNorm(cfg.head_dim, cfg.norm_eps) if cfg.qk_norm else None
@@ -259,16 +262,45 @@ class GPT(nn.Module):
             loss = ce + z
         return ModelOutput(logits, loss, ce.detach(), None if z is None else z.detach())
 
+    def param_groups_for(self) -> dict[str, list[nn.Parameter]]:
+        """Split parameters into named groups.
+
+        ``hidden``: the 2D weights inside the blocks (Muon, or AdamW with weight decay).
+        ``head``: an untied output projection (AdamW with weight decay).
+        ``no_decay``: the embedding (no weight decay, as in OLMo 2 and SmolLM3) and all 1D parameters.
+        """
+        emb = self.tok_emb.weight
+        hidden = [p for p in self.blocks.parameters() if p.requires_grad and p.dim() == 2]
+        hidden_ids = {id(p) for p in hidden}
+        head = [] if self.lm_head.weight is emb else [self.lm_head.weight]
+        head_ids = {id(p) for p in head}
+        no_decay = [p for p in self.parameters()
+                    if p.requires_grad and id(p) not in hidden_ids and id(p) not in head_ids]
+        return {"hidden": hidden, "head": head, "no_decay": no_decay}
+
     def configure_optimizer(self, learning_rate: float, weight_decay: float, betas: tuple[float, float],
-                            eps: float, device_type: str) -> torch.optim.AdamW:
-        """AdamW with weight decay on >=2D parameters only; fused on CUDA when available."""
-        params = [p for p in self.parameters() if p.requires_grad]
-        decay = [p for p in params if p.dim() >= 2]
-        no_decay = [p for p in params if p.dim() < 2]
-        groups = [
-            {"params": decay, "weight_decay": weight_decay},
-            {"params": no_decay, "weight_decay": 0.0},
-        ]
+                            eps: float, device_type: str, optimizer: str = "adamw",
+                            momentum: float = 0.95, ns_steps: int = 5) -> torch.optim.Optimizer:
+        """Build the optimizer.
+
+        ``muon``: Muon for the hidden matrices, AdamW for the rest (one optimizer, see sapia.muon).
+        ``adamw``: AdamW everywhere (fused on CUDA). Both apply weight decay to the hidden matrices
+        and an untied head only, never to the embedding or 1D parameters. Groups are named
+        ``muon`` / ``adamw_decay`` / ``adamw_no_decay``.
+        """
+        g = self.param_groups_for()
+        if optimizer == "muon":
+            from .muon import MuonAdamW
+
+            groups = [{"name": "muon", "params": g["hidden"], "use_muon": True, "weight_decay": weight_decay},
+                      {"name": "adamw_decay", "params": g["head"], "weight_decay": weight_decay},
+                      {"name": "adamw_no_decay", "params": g["no_decay"], "weight_decay": 0.0}]
+            groups = [x for x in groups if x["params"]]
+            return MuonAdamW(groups, lr=learning_rate, momentum=momentum, ns_steps=ns_steps, betas=betas, eps=eps)
+        if optimizer != "adamw":
+            raise ValueError(f"unknown optimizer {optimizer!r}")
+        groups = [{"name": "adamw_decay", "params": g["hidden"] + g["head"], "weight_decay": weight_decay},
+                  {"name": "adamw_no_decay", "params": g["no_decay"], "weight_decay": 0.0}]
         fused = device_type == "cuda" and "fused" in inspect.signature(torch.optim.AdamW).parameters
         extra = {"fused": True} if fused else {}
         return torch.optim.AdamW(groups, lr=learning_rate, betas=betas, eps=eps, **extra)

@@ -2,11 +2,11 @@
 
 Status: **implemented** in `sapia/sources.py` (sources, filters, formatting) and
 `sapia/prepare_mix.py` (preparation). A tiny end-to-end run against the real datasets works;
-the full ~15B-token preparation has not been run yet.
+the full preparation (~7.5B tokens for v1) has not been run yet.
 
 Goal: an English model that is **accurate** (knowledge, reasoning) and **conversational**
 (natural back-and-forth, explanations to a person, everyday language), within a budget of
-~15B tokens on one GH200 (see [ARCHITECTURE.md](ARCHITECTURE.md)). The exact total is set after
+~7.5B tokens for Sapia v1 (see [DESIGN_V1.md](DESIGN_V1.md); the table below shows the original ~15B plan). The exact total is set after
 the throughput trial; the shares below stay fixed and scale with it.
 
 ## Main mix (first ~90% of tokens, ~13.5B)

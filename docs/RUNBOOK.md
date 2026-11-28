@@ -41,7 +41,7 @@ bash scripts/launch.sh
 
 `launch.sh` starts `scripts/run_all.sh` in a tmux session called `sapia`:
 
-1. **Data preparation** (`python -m sapia.prepare_mix`, ~15B tokens into `~/sapia-data/sapia-mix`).
+1. **Data preparation** (`python -m sapia.prepare_mix`, ~7.5B tokens into `~/sapia-data/sapia-mix`).
    Several hours of downloading and tokenizing; uses the CPU cores only.
 2. **Training** (`python -m sapia.train --config configs/sapia.yaml`), checkpoints every 30 minutes
    in `~/sapia-runs/sapia/checkpoints`, automatic restart from the last checkpoint after a crash.
@@ -63,22 +63,22 @@ You get an ntfy message when each stage starts, every 1B tokens, at the switch t
 
 ## 5. Setting the token budget after the first hour
 
-Training starts with `max_tokens = 15e9`. After ~30 minutes of training, read the speed from the
+Training starts with `max_tokens = 7.5e9`. After ~30 minutes of training, read the speed from the
 log (`tok/s`). Usable tokens ~= tok/s x hours left x 3600. To change it, stop and relaunch:
 
 ```bash
 tmux attach -t sapia      # then Ctrl+C once: it saves a checkpoint and stops
-export SAPIA_TOKENS=13e9  # your new total
+export SAPIA_TOKENS=6.5e9  # your new total
 bash scripts/launch.sh    # data prep is skipped (already done), training resumes
 ```
 
 The learning rate is constant until the final 10% of `max_tokens` (warmup-stable-decay), so
-changing `max_tokens` any time before that is safe. Data was prepared for 15B tokens; a smaller
+changing `max_tokens` any time before that is safe. Data was prepared for 7.5B tokens; a smaller
 total just leaves some unused, a larger one makes the loader repeat data.
 
 ## 6. Getting the model home
 
-At the end, `~/sapia-runs/sapia/final.pt` holds the bf16 weights (~2.4 GB). On your laptop:
+At the end, `~/sapia-runs/sapia/final.pt` holds the bf16 weights (~2.1 GB). On your laptop:
 
 ```powershell
 scp root@<server-ip>:~/sapia-runs/sapia/final.pt C:\models\sapia\

@@ -38,13 +38,13 @@ def F(default: Any, help: str) -> Any:  # noqa: N802 - tiny field helper
 @dataclass
 class ModelConfig:
     vocab_size: int = F(49152, "Vocabulary size (SmolLM2 tokenizer, already a multiple of 64).")
-    block_size: int = F(2048, "Context length in tokens.")
-    n_layer: int = F(24, "Number of transformer blocks.")
+    block_size: int = F(2048, "Maximum context length in tokens (the final phase trains at this length).")
+    n_layer: int = F(28, "Number of transformer blocks.")
     n_head: int = F(16, "Query heads (d_model must be divisible by n_head).")
     n_kv_head: int = F(4, "Key/value heads for grouped-query attention (n_head must be divisible by it; "
                           "n_kv_head == n_head is plain multi-head attention).")
-    d_model: int = F(2048, "Residual stream width.")
-    mlp_hidden: int = F(5632, "SwiGLU hidden width (2.75 * d_model, a multiple of 64).")
+    d_model: int = F(1792, "Residual stream width.")
+    mlp_hidden: int = F(4864, "SwiGLU hidden width (~2.71 * d_model, a multiple of 64).")
     rope_base: float = F(10000.0, "RoPE frequency base.")
     norm_eps: float = F(1e-6, "RMSNorm epsilon.")
     qk_norm: bool = F(True, "RMSNorm over each head's queries and keys (before RoPE).")
@@ -80,7 +80,7 @@ class ModelConfig:
         norms = 2 * d + (2 * hd if self.qk_norm else 0)              # two RMSNorms (+ q and k norms)
         return emb + self.n_layer * (attn + mlp + norms) + d         # + final RMSNorm
 
-    def flops_per_token(self) -> float:
+    def flops_per_token(self, context: Optional[int] = None) -> float:
         """Approximate forward+backward FLOPs per trained token.
 
         6*N for the weight matmuls (2N forward, 4N backward; the tied embedding counts
@@ -88,7 +88,7 @@ class ModelConfig:
         which have no parameters: 12 * n_layer * d_model * block_size. Grouped-query
         attention does not shrink the latter: the number of query heads is unchanged.
         """
-        return 6.0 * self.num_params() + 12.0 * self.n_layer * self.d_model * self.block_size
+        return 6.0 * self.num_params() + 12.0 * self.n_layer * self.d_model * (context or self.block_size)
 
 
 @dataclass
@@ -101,7 +101,7 @@ class TrainConfig:
     out_dir: str = F("runs/sapia", "Run directory (checkpoints, metrics.jsonl, train.log).")
 
     # ---- training budget
-    max_tokens: int = F(15_000_000_000, "Total training tokens; the LR schedule is defined over this. "
+    max_tokens: int = F(7_500_000_000, "Total training tokens; the LR schedule is defined over this. "
                                          "Set it from a measured throughput trial.")
     max_steps: Optional[int] = F(None, "Optional cap on optimizer steps (auto = derived from max_tokens).")
     max_hours: Optional[float] = F(None, "Wall-clock budget for this invocation; checkpoints and exits cleanly.")
@@ -110,17 +110,21 @@ class TrainConfig:
     # ---- batch / memory auto-config
     batch_size: Optional[int] = F(None, "Micro-batch size in sequences. auto = probe GPU memory.")
     grad_accum_steps: Optional[int] = F(None, "Micro-batches per optimizer step. auto = hit target_tokens_per_step.")
-    target_tokens_per_step: int = F(1_048_576, "Target tokens per optimizer step (batch * accum * block_size).")
+    target_tokens_per_step: int = F(524_288, "Target tokens per optimizer step (batch * accum * block_size).")
     max_batch_size: int = F(512, "Upper bound for the auto-probed micro-batch size.")
     vram_fraction: float = F(0.85, "Fraction of usable VRAM the probed peak may occupy (safety margin).")
     reuse_batch_plan: bool = F(True, "On resume, reuse the checkpoint's probed batch plan if the GPU matches.")
 
     # ---- optimizer / schedule
-    learning_rate: float = F(3e-4, "Peak learning rate.")
+    optimizer: str = F("muon", "muon (Muon for hidden matrices + AdamW for the rest) | adamw.")
+    muon_momentum: float = F(0.95, "Muon momentum (Nesterov).")
+    main_block_size: Optional[int] = F(1024, "Context length in the main phase (auto = model.block_size); "
+                                             "the anneal phase uses model.block_size.")
+    learning_rate: float = F(5e-4, "Peak learning rate (shared by Muon and AdamW).")
     lr_schedule: str = F("wsd", "wsd (warmup, constant, linear decay over the last anneal_fraction) | cosine.")
     min_lr_ratio: float = F(0.0, "Final LR as a fraction of the peak.")
     anneal_fraction: float = F(0.1, "Final share of max_tokens trained on the anneal mix (and the WSD decay).")
-    warmup_tokens: int = F(400_000_000, "Linear warmup length, in tokens.")
+    warmup_tokens: int = F(150_000_000, "Linear warmup length, in tokens.")
     weight_decay: float = F(0.1, "AdamW weight decay, applied to >=2D parameters only.")
     beta1: float = F(0.9, "AdamW beta1.")
     beta2: float = F(0.95, "AdamW beta2.")
@@ -175,6 +179,11 @@ class TrainConfig:
             raise ConfigError("keep_last must be >= 1")
         if self.learning_rate <= 0:
             raise ConfigError("learning_rate must be positive")
+        if self.optimizer not in ("muon", "adamw"):
+            raise ConfigError(f"optimizer must be muon|adamw, got {self.optimizer!r}")
+        if self.main_block_size is not None:
+            if not 1 <= self.main_block_size <= self.model.block_size or self.model.block_size % self.main_block_size:
+                raise ConfigError("main_block_size must divide model.block_size (e.g. 1024 for 2048)")
         if self.lr_schedule not in ("wsd", "cosine"):
             raise ConfigError(f"lr_schedule must be wsd|cosine, got {self.lr_schedule!r}")
         if not 0.0 <= self.anneal_fraction < 1.0:
@@ -201,6 +210,7 @@ def _preset_tiny() -> TrainConfig:
         preset="tiny",
         model=ModelConfig(vocab_size=49152, block_size=128, n_layer=4, n_head=4, n_kv_head=2, d_model=128,
                           mlp_hidden=352),
+        main_block_size=64,
         data_dir="data/tiny",
         out_dir="runs/tiny",
         max_tokens=1_600_000,

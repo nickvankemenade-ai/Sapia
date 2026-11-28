@@ -37,7 +37,7 @@ def test_end_to_end_prep_train_resume_sample(tmp_path, parquet_corpus):
     cfg = small_train_cfg(
         model_cfg, data_dir, tmp_path / "run", max_tokens=tokens_per_step * 40, target_tokens_per_step=tokens_per_step,
         batch_size=None, grad_accum_steps=None, max_batch_size=16, warmup_tokens=tokens_per_step * 4,
-        eval_interval=20, eval_tokens=48 * 32, log_interval=5, ckpt_interval=20,
+        eval_interval=20, eval_tokens=48 * 32, log_interval=5, ckpt_interval=20, main_block_size=24,
     )
     first = train(cfg, _stop_after_steps=20)
     assert (first["status"], first["step"]) == ("interrupted", 20)
@@ -63,6 +63,8 @@ def test_end_to_end_prep_train_resume_sample(tmp_path, parquet_corpus):
     log = (run_dir / "train.log").read_text(encoding="utf-8")
     assert log.count("detected resources") == 2
     assert "data phase: anneal from" in log                       # switched to the anneal mix near the end
+    assert "context: 24 tokens in the main phase, 48 in the anneal phase" in log
+    assert "optimizer: muon" in log
     assert {r.get("phase") for r in train_recs} == {"main", "anneal"}
     assert second["final_weights"] and (run_dir / "final.pt").exists()
     final_model, final_meta = load_model(run_dir / "final.pt", torch.device("cpu"))
@@ -82,11 +84,15 @@ def test_end_to_end_prep_train_resume_sample(tmp_path, parquet_corpus):
 
 
 def test_gradient_accumulation_matches_big_batch(tmp_path, small_model_cfg, pattern_dataset):
-    """4 micro-batches of 4 must take the same optimizer steps as 1 batch of 16 (same data order)."""
+    """4 micro-batches of 4 must take the same optimizer steps as 1 batch of 16 (same data order).
+
+    Checked with AdamW: Muon's bf16 Newton-Schulz step amplifies float rounding differences
+    between the two summation orders to ~1e-4, which is expected and harmless.
+    """
     big = small_train_cfg(small_model_cfg, pattern_dataset, tmp_path / "big", max_tokens=16 * 32 * 4,
-                          eval_interval=100, ckpt_interval=100)
+                          eval_interval=100, ckpt_interval=100, optimizer="adamw")
     acc = small_train_cfg(small_model_cfg, pattern_dataset, tmp_path / "acc", max_tokens=16 * 32 * 4,
-                          eval_interval=100, ckpt_interval=100, batch_size=4, grad_accum_steps=4)
+                          eval_interval=100, ckpt_interval=100, batch_size=4, grad_accum_steps=4, optimizer="adamw")
     a, b = train(big), train(acc)
     assert a["step"] == b["step"] == 4 and a["tokens_seen"] == b["tokens_seen"]
     wa = load_latest_checkpoint(tmp_path / "big" / "checkpoints")[0]["model"]

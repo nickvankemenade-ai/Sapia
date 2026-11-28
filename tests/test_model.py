@@ -55,16 +55,16 @@ def test_rope_preserves_norm_and_depends_only_on_relative_position():
 def test_sapia_preset_has_the_documented_shape_and_size():
     cfg = get_preset("sapia").model
     assert (cfg.n_layer, cfg.d_model, cfg.n_head, cfg.n_kv_head, cfg.head_dim, cfg.mlp_hidden) == \
-        (24, 2048, 16, 4, 128, 5632)
+        (28, 1792, 16, 4, 112, 4864)
     assert (cfg.vocab_size, cfg.block_size, cfg.qk_norm, cfg.tie_embeddings) == (49152, 2048, True, True)
-    assert cfg.num_params() == 1_182_900_224
+    assert cfg.num_params() == 1_045_145_472
 
 
 def test_full_size_model_matches_formula_on_meta_device():
     cfg = get_preset("sapia").model
     with torch.device("meta"):
         model = GPT(cfg)
-    assert model.num_params() == cfg.num_params() == 1_182_900_224
+    assert model.num_params() == cfg.num_params() == 1_045_145_472
 
 
 @pytest.mark.parametrize("kw", [{}, {"n_kv_head": 4}, {"n_kv_head": 1}, {"qk_norm": False},
@@ -241,12 +241,18 @@ def test_a_few_optimizer_steps_overfit_one_batch():
     assert float(loss) < 0.5 * first
 
 
-def test_weight_decay_only_on_matrices():
+def test_weight_decay_on_hidden_matrices_only_never_the_embedding():
     m = small_model()
-    opt = m.configure_optimizer(1e-3, 0.1, (0.9, 0.95), 1e-8, "cpu")
-    decay, no_decay = opt.param_groups
-    assert all(p.dim() >= 2 for p in decay["params"]) and decay["weight_decay"] == 0.1
-    assert all(p.dim() < 2 for p in no_decay["params"]) and no_decay["weight_decay"] == 0.0
+    for kind in ("adamw", "muon"):
+        opt = m.configure_optimizer(1e-3, 0.1, (0.9, 0.95), 1e-8, "cpu", optimizer=kind)
+        groups = {g["name"]: g for g in opt.param_groups}
+        no_decay = groups["adamw_no_decay"]
+        assert no_decay["weight_decay"] == 0.0
+        assert any(p is m.tok_emb.weight for p in no_decay["params"])          # tied embedding: no decay
+        decayed = groups["muon" if kind == "muon" else "adamw_decay"]
+        assert decayed["weight_decay"] == 0.1 and all(p.dim() == 2 for p in decayed["params"])
+        n = sum(p.numel() for g in opt.param_groups for p in g["params"])
+        assert n == m.num_params()                                              # every parameter exactly once
 
 
 @pytest.mark.gpu

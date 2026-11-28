@@ -1,6 +1,6 @@
 # Sapia
 
-A ~1.2B-parameter language model, pretrained from scratch on a curated English mix (FineWeb-Edu plus conversational data) on a single GH200.
+A 1.05B-parameter language model (v1: 28 layers x 1792, Muon optimizer), pretrained from scratch on a curated English mix (FineWeb-Edu plus conversational data) on a single GPU. Design: [docs/DESIGN_V1.md](docs/DESIGN_V1.md).
 
 Status: complete pipeline (data prep, training, export). See [docs/RUNBOOK.md](docs/RUNBOOK.md) to run it on a GPU server. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the proposed architecture and [docs/DATA.md](docs/DATA.md) for the data mix.
 
@@ -13,7 +13,7 @@ Inspired by `modal-lm` (the 257M `gpt250m` model).
 ```bash
 pip install -e ".[dev]"
 python -m sapia.prepare_mix --preset tiny            # ~2M tokens, one file per source (minutes)
-python -m sapia.prepare_mix --total_tokens 15e9      # the real mix (resumable; rerun to continue)
+python -m sapia.prepare_mix --total_tokens 7.5e9     # the real mix (resumable; rerun to continue)
 pytest
 ```
 

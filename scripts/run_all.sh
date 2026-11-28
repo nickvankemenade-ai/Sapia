@@ -5,7 +5,7 @@
 # Settings (environment variables, all optional):
 #   SAPIA_DATA        data directory           (default ~/sapia-data/sapia-mix)
 #   SAPIA_RUN         run / checkpoint folder  (default ~/sapia-runs/sapia)
-#   SAPIA_TOKENS      total training tokens    (default 15e9)
+#   SAPIA_TOKENS      total training tokens    (default 7.5e9)
 #   SAPIA_NTFY_TOPIC  ntfy topic for phone alerts
 #   SAPIA_TRAIN_ARGS  extra flags for sapia.train, e.g. "--max_total_hours 95"
 set -uo pipefail
@@ -15,7 +15,7 @@ source "$HOME/sapia-venv/bin/activate"
 
 DATA="${SAPIA_DATA:-$HOME/sapia-data/sapia-mix}"
 RUN="${SAPIA_RUN:-$HOME/sapia-runs/sapia}"
-TOKENS="${SAPIA_TOKENS:-15e9}"
+TOKENS="${SAPIA_TOKENS:-7.5e9}"
 mkdir -p "$(dirname "$DATA")" "$RUN"
 
 notify() {

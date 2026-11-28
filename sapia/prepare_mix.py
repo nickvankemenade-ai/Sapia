@@ -1,8 +1,8 @@
 """Prepare the whole Sapia pretraining mix (docs/DATA.md), one source at a time.
 
-    python -m sapia.prepare_mix --total_tokens 15e9                 # the real run (~15B tokens)
+    python -m sapia.prepare_mix --total_tokens 7.5e9                # the real run (~7.5B tokens)
     python -m sapia.prepare_mix --preset tiny                       # ~2M tokens, one file per source
-    python -m sapia.prepare_mix --total_tokens 15e9 --only reddit   # (re)run selected sources
+    python -m sapia.prepare_mix --total_tokens 7.5e9 --only reddit   # (re)run selected sources
 
 Layout::
 
@@ -37,7 +37,7 @@ MIX_VERSION = 1
 @dataclass
 class MixConfig:
     out_dir: str = "data/sapia-mix"
-    total_tokens: int = 15_000_000_000
+    total_tokens: int = 7_500_000_000
     anneal_fraction: float = 0.10
     phases: str = "main,anneal"
     only: Optional[str] = None            # comma-separated source names

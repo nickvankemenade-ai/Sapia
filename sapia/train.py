@@ -338,11 +338,18 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
             status = "ready" if src["prepared"] else ("PARTIAL" if src["train_tokens"] else "MISSING")
             log(f"data {phase:6s} {src['name']:18s} share {src['share']:6.1%} | {fmt_count(src['train_tokens'])} of "
                 f"{fmt_count(src['target_tokens'])} tokens [{status}]")
-    val_sets = mixture_val_sets(cfg.data_dir, "main", block, mode=data_mode)
+    ctx_main = cfg.main_block_size or block
+
+    def phase_ctx(phase_name: str) -> int:
+        """Training context per phase: main_block_size for the main mix, the full block_size after."""
+        return block if phase_name == "anneal" else ctx_main
+
+    log(f"context: {ctx_main} tokens in the main phase, {block} in the anneal phase")
+    val_sets = mixture_val_sets(cfg.data_dir, "main", ctx_main, mode=data_mode)
     if not val_sets:
         log("WARNING: no usable validation data; val loss will not be reported")
     probe_loader = MixtureLoader(cfg.data_dir, "main", block, 1, cfg.seed, mode=data_mode)
-    n_train_windows = sum(s.n_windows for s in probe_loader.shards)
+    n_train_windows = sum(s.n_windows for s in probe_loader.shards)   # in full-length (block_size) windows
     n_train_tokens = sum(s.n_tokens for s in probe_loader.shards)
     probe_loader.close()
 
@@ -409,7 +416,10 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
 
     # ---- optimizer, scaler, restored state
     optimizer = model.configure_optimizer(cfg.learning_rate, cfg.weight_decay, (cfg.beta1, cfg.beta2),
-                                          cfg.adam_eps, device.type)
+                                          cfg.adam_eps, device.type, optimizer=cfg.optimizer,
+                                          momentum=cfg.muon_momentum)
+    log(f"optimizer: {cfg.optimizer} | " + ", ".join(
+        f"{g.get('name', i)}: {sum(p.numel() for p in g['params']):,} params" for i, g in enumerate(optimizer.param_groups)))
     fused = optimizer.defaults.get("fused", None)
     scaler = precision.make_scaler()
     loader_states: dict = {}
@@ -417,13 +427,20 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
     last_val: Optional[float] = None
     train_time_prev = 0.0
     if ckpt is not None:
+        saved_opt = ckpt.get("train_config", {}).get("optimizer", "adamw")
+        if saved_opt != cfg.optimizer:
+            raise ConfigError(f"the checkpoint was trained with optimizer={saved_opt!r}; resume with the same "
+                              f"optimizer or start a new --out_dir")
         optimizer.load_state_dict(ckpt["optimizer"])
-        for group, wd in zip(optimizer.param_groups, (cfg.weight_decay, 0.0)):
+        for group in optimizer.param_groups:
             # Current settings win over the saved hyperparameters; fused must match this device.
-            group["weight_decay"] = wd
+            group["weight_decay"] = 0.0 if group.get("name") == "adamw_no_decay" else cfg.weight_decay
             group["betas"] = (cfg.beta1, cfg.beta2)
             group["eps"] = cfg.adam_eps
-            group["fused"] = fused
+            if group.get("use_muon"):
+                group["momentum"] = cfg.muon_momentum
+            if fused is not None:
+                group["fused"] = fused
         if precision.use_scaler and ckpt.get("scaler"):
             scaler.load_state_dict(ckpt["scaler"])
         elif precision.use_scaler:
@@ -479,7 +496,7 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
 
     gpu_name = res.gpus[device.index or 0].name if (device.type == "cuda" and res.gpus) else None
     peak_flops = cfg.peak_flops or lookup_peak_flops(gpu_name)
-    flops_per_token = cfg.model.flops_per_token()
+    flops_per_token = cfg.model.flops_per_token(ctx_main)
     params = [p for p in model.parameters() if p.requires_grad]
 
     # ---- training_metrics.json (single-document summary, read by the dashboard)
@@ -512,11 +529,15 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
         return "anneal" if ("anneal" in phases and tokens >= anneal_start(cfg, horizon)) else "main"
 
     def make_loader(phase: str) -> MixtureLoader:
-        return MixtureLoader(cfg.data_dir, phase, block, bplan.batch_size, cfg.seed, mode=data_mode,
+        # The micro-batch is planned in full-length sequences; shorter contexts take more of them,
+        # so the tokens per micro-batch (and per optimizer step) stay the same.
+        ctx = phase_ctx(phase)
+        return MixtureLoader(cfg.data_dir, phase, ctx, bplan.batch_size * (block // ctx), cfg.seed, mode=data_mode,
                              state=loader_states.get(phase))
 
     phase = phase_for(tokens_seen)
     loader = make_loader(phase)
+    flops_per_token = cfg.model.flops_per_token(phase_ctx(phase))
     log(f"data phase: {phase} ({', '.join(f'{n} {w:.1%}' for n, w in zip(loader.names, loader.weights))})")
     t_loop = time.time()
     t_loop_pc = time.perf_counter()  # high-resolution clock for the time limits (time.time is coarse on Windows)
@@ -660,6 +681,7 @@ def _train(cfg: TrainConfig, out_dir: Path, log: Callable[[str], None],
                 loader.close()
                 phase = wanted
                 loader = make_loader(phase)
+                flops_per_token = cfg.model.flops_per_token(phase_ctx(phase))
                 log(f"data phase: {phase} from {tokens_seen:,} tokens "
                     f"({', '.join(f'{n} {w:.1%}' for n, w in zip(loader.names, loader.weights))})")
                 notify.send(f"Switched to the {phase} phase at {fmt_count(tokens_seen)} tokens; lr now decays.")

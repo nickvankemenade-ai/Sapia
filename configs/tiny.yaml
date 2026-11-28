@@ -11,6 +11,8 @@ model:
   d_model: 128
   mlp_hidden: 352
 
+main_block_size: 64
+
 data_dir: data/tiny
 out_dir: runs/tiny
 max_tokens: 1_600_000
